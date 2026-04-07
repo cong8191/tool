@@ -1,0 +1,18 @@
+{
+  "templatePath": "C:\\Projects\\gemini-excel-tool\\template_FtoF.xlsx",
+  "designDocsDir": "D:\\Project\\151_ISA_AsteriaWrap\\trunk\\99_FromJP\\10_プロジェクト資材\\02.IFAgreement\\03.確定",
+  "outputDir": "C:\\Projects\\gemini-excel-tool",
+  "data": {
+    "E309": [
+      {
+        "cotc": "BPFB0372",
+        "combinedGH": "0372-0"
+      },
+      {
+        "cotc": "SHNH0488",
+        "combinedGH": "0372-0"
+      }
+    ]
+  },
+  "today": "2026/4/1"
+}
