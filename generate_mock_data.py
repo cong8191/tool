@@ -56,13 +56,9 @@ def generate_mock_value(pattern, field_index, data_type, length_str, scale_str):
     # --- Logic cho pattern MAX_LEN ---
     if pattern == "MAX_LEN":
         # 1. Kiểu Số (Number)
-        if "数値型" in data_type:
-            # Lặp lại chuỗi index để lấp đầy độ dài, đảm bảo tính duy nhất
-            num_str = (id_str * (int_len // len(id_str) + 1))[:int_len]
-            if dec_len > 0:
-                dec_part = (id_str * (dec_len // len(id_str) + 1))[:dec_len]
-                return f"{num_str}.{dec_part}"
-            return num_str
+        if "数値型/Number" in data_type:
+           
+            return '2323'
 
         # 2. Kiểu Ngày (Date)
         elif "日付型" in data_type:
@@ -70,14 +66,9 @@ def generate_mock_value(pattern, field_index, data_type, length_str, scale_str):
             return (datetime(2024, 1, 1) + timedelta(days=field_index)).strftime('%Y%m%d')
 
         # 3. Kiểu Text (Bán góc / Toàn góc)
-        elif "文字型" in data_type:
-            # Trộn ký tự cố định và index để dễ nhận biết và duy nhất
-            if "全角" in data_type:
-                base_char = "あ"
-                return (f"{base_char}{id_str}" * (total_len // (len(id_str) + 1) + 1))[:total_len]
-            else: # Hankaku
-                base_char = "A"
-                return (f"{base_char}{id_str}" * (total_len // (len(id_str) + 1) + 1))[:total_len]
+        elif "文字型/Text" in data_type:
+            
+            return 'ưewe'
 
     # --- Logic cho pattern SHORT_LEN (Thiếu 1 ký tự) ---
     elif pattern == "SHORT_LEN":
@@ -106,7 +97,7 @@ def generate_mock_value(pattern, field_index, data_type, length_str, scale_str):
         over_int_len = int_len + 1
         over_total_len = total_len + 1
         
-        if "数値型" in data_type:
+        if "数値型/Number" in data_type:
             num_str = (id_str * (over_int_len // len(id_str) + 1))[:over_int_len]
             if dec_len > 0:
                 dec_part = (id_str * (dec_len // len(id_str) + 1))[:dec_len]
@@ -117,7 +108,7 @@ def generate_mock_value(pattern, field_index, data_type, length_str, scale_str):
             # Thêm ký tự 'X' hoặc '9' vào cuối để tạo ra lỗi tràn 9 ký tự
             return (datetime(2024, 1, 1) + timedelta(days=field_index)).strftime('%Y%m%d') + "9"
             
-        elif "文字型" in data_type:
+        elif "文字型/Text" in data_type:
             base_char = "あ" if "全角" in data_type else "A"
             return (f"{base_char}{id_str}" * (over_total_len // (len(id_str) + 1) + 1))[:over_total_len]
 
@@ -226,18 +217,36 @@ def generate_data_from_testcase(input_file):
                     
                     print(f"  -> Đang xử lý dòng {row_num} với pattern: {pattern}")
                     
+                    # Lấy danh sách các field Input hợp lệ
+                    input_fields = [f for f in mapping_data if is_numeric(f.get('in_seq'))]
+                    if not input_fields:
+                        continue
+                        
+                    # Đọc dữ liệu hiện tại của dòng bắt đầu từ cột H (index 8)
+                    start_cell = s_test_report.cells(row_num, 8)
+                    end_cell = s_test_report.cells(row_num, 8 + len(input_fields) - 1)
+                    existing_marks = s_test_report.range(start_cell, end_cell).value
+                    if not isinstance(existing_marks, list):
+                        existing_marks = [existing_marks]
+                        
                     row_values = []
+                    used_values_in_row = set()
                     # Duyệt qua các field trong mapping để sinh data tương ứng
-                    for field in mapping_data:
-                        # Chỉ sinh data cho các trường Input (có No.)
-                        if not is_numeric(field.get('in_seq')): continue
-                            
-                        mock_val = generate_mock_value(
-                            pattern=pattern, field_index=int(field.get('in_seq')),
-                            data_type=field.get('in_type_norm', ''), length_str=field.get('in_k'),
-                            scale_str=field.get('in_l')
-                        )
-                        row_values.append(mock_val)
+                    for i, field in enumerate(input_fields):
+                        mark = str(existing_marks[i]).strip() if existing_marks[i] is not None else ""
+                        
+                        # Chỉ sinh data nếu ô hiện tại có chứa dấu 'o', 'O', '〇' (tròn to tiếng Nhật), hoặc '○'
+                        if mark in ['o', 'O', '〇', '○']:
+                            mock_val = generate_mock_value(
+                                pattern=pattern, field_index=int(field.get('in_seq')),
+                                data_type=field.get('in_type_norm', ''), length_str=field.get('in_k'),
+                                scale_str=field.get('in_l'),
+                                used_values=used_values_in_row
+                            )
+                            row_values.append(mock_val)
+                        else:
+                            # Không có dấu 'o', giữ nguyên giá trị cũ (VD: '-', '×', khoảng trắng)
+                            row_values.append(existing_marks[i])
                     
                     if row_values:
                         s_test_report.range(f'H{row_num}').value = row_values
