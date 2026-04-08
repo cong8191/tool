@@ -18,6 +18,13 @@ def is_code_conv(val):
     val_str = str(val).strip()
     return "変換" in val_str or "コード" in val_str
 
+def get_mapping_message(item):
+    if item.get('x_val') != "固定長":
+        return "入力ファイルが固定長でないため検証不可"
+    elif item.get('ap_val') != "固定長": 
+        return "出力ファイルが可変長でないため検証不可"
+    return "入力項目がないため検証不可" # Hoặc logic khác
+
 def evaluate_rule(rule_name, item, data, has_code_conv=False):
     in_seq = str(data.get('in_seq', '')).strip() if pd.notnull(data.get('in_seq')) else ""
     out_seq = str(data.get('out_seq', '')).strip() if pd.notnull(data.get('out_seq')) else ""
@@ -32,12 +39,16 @@ def evaluate_rule(rule_name, item, data, has_code_conv=False):
         return "Outputが存在する" if out_seq else None
     elif rule_name == "IS_NOT_X_FIXED_LENGTH":
         return "固定長である" if item.get('x_val') == "固定長" else None
-    elif rule_name == "IS_FIXED_LENGTH":
-        return "固定長ではない" if item.get('aq_val') != "固定長" else None
+    elif rule_name == "IS_OUT_FIXED_LENGTH":
+        return "固定長ではない" if item.get('ap_val') == "固定長" else None
+    elif rule_name == "IS_OUT_NOT_FIXED_LENGTH":
+        return "固定長ではない" if item.get('ap_val') != "固定長" else None
     elif rule_name == "ALWAYS_NG":
         return "常にNG"
     elif rule_name == "IS_NUM_IN":
         return "Inputが数値型ではない" if not data.get('is_num') else None
+    elif rule_name == "IS_TEXT_ZENKAKU_IN":
+        return "Inputが文字型(全角)ではない" if not data.get('is_text_zenkaku') else None
     elif rule_name == "IS_NUM_OUT":
         return "Outputが数値型ではない" if not data.get('is_num_out') else None
     elif rule_name == "HAS_X_IN":
@@ -84,29 +95,36 @@ def generate_testcase(input_ids=None, target_date=None):
     PATTERN_CONFIGS = {
         "FtoF": {
             "テスト計画書兼結果報告書(マッピング)": {
-                10: {"name": "最大(指定)桁数", "checks": ["HAS_IN", "HAS_OUT"], "skip_msg": lambda item, mapping: "対象項目がないため検証不可"},
-                11: {"name": "指定桁数(固定長)未満", "checks": ["HAS_IN", "HAS_OUT"], "skip_msg": lambda item, mapping: "固定長のため検証不可" if item.get('x_val') == "固定長" else "対象項目がないため検証不可"},
-                12: {"name": "桁あふれ", "checks": ["IS_NOT_X_FIXED_LENGTH", "HAS_IN", "HAS_OUT"], "skip_msg": lambda item, mapping: "固定長のため検証不可" if item.get('x_val') == "固定長" else "対象項目がないため検証不可"},
-                13: {"name": "記号混在", "checks": ["HAS_IN", "HAS_OUT"], "skip_msg": lambda item, mapping: "対象項目がないため検証不可"},
-                14: {"name": "データ型不整合混在", "checks": ["HAS_IN", "HAS_OUT"], "skip_msg": lambda item, mapping: "対象項目がないため検証不可"},
-                15: {"name": "全角文字混在", "checks": ["ALWAYS_NG"], "skip_msg": lambda item, mapping: "対象項目がないため検証不可"},
-                16: {"name": "全項目値無", "checks": ["HAS_IN", "HAS_OUT"], "skip_msg": lambda item, mapping: "対象項目がないため検証不可"},
-                17: {"name": "0の場合", "checks": ["IS_NUM_IN"], "skip_msg": lambda item, mapping: "Inputが数値型ではないため検証不可"},
-                18: {"name": "+の場合", "checks": ["IS_NUM_IN"], "skip_msg": lambda item, mapping: "Inputが数値型ではないため検証不可"},
-                19: {"name": "-の場合", "checks": ["IS_NUM_IN", "HAS_X_IN"], "skip_msg": lambda item, mapping: "Inputが数値型ではない、またはマイナス項目がないため検証不可"},
-                20: {"name": "小数点", "checks": ["IS_NUM_IN", "HAS_GT0_IN"], "skip_msg": lambda item, mapping: "Inputが数値型ではない、または小数点がないため検証不可"},
-                24: {"name": "InputのみNG", "checks": ["HAS_IN", "NOT_HAS_OUT"], "skip_msg": lambda item, mapping: "Inputがない、またはOutputが存在するため検証不可"},
-                27: {"name": "Outputチェック", "checks": ["HAS_OUT"], "skip_msg": lambda item, mapping: "Outputがないため検証不可"},
-                28: {"name": "Output 0の場合", "checks": ["IS_NUM_OUT"], "skip_msg": lambda item, mapping: "Outputが数値型ではないため検証不可"},
-                29: {"name": "Output +の場合", "checks": ["IS_NUM_OUT"], "skip_msg": lambda item, mapping: "Outputが数値型ではないため検証不可"},
-                30: {"name": "Output -の場合", "checks": ["IS_NUM_OUT", "HAS_X_OUT"], "skip_msg": lambda item, mapping: "Outputが数値型ではない、またはOutputにマイナス項目がないため検証不可"},
-                31: {"name": "Output 小数点", "checks": ["IS_NUM_OUT", "HAS_GT0_OUT"], "skip_msg": lambda item, mapping: "Outputが数値型ではない、またはOutputに小数点がないため検証不可"},
-                32: {"name": "Output 固定長", "checks": ["IS_FIXED_LENGTH", "HAS_OUT"], "skip_msg": lambda item, mapping: "固定長ではない、またはOutputがないため検証不可"},
-                35: {"name": "OutputのみNG", "checks": ["HAS_OUT", "NOT_HAS_IN"], "skip_msg": lambda item, mapping: "Outputがない、またはInputが存在するため検証不可"},
-                37: {"name": "コード・区分変換1", "checks": ["HAS_OUT", "IS_CODE_CONV_OUT"], "skip_msg": lambda item, mapping: "Outputがない、またはコード変換処理ではないため検証不可"},
-                38: {"name": "コード・区分変換2", "checks": ["HAS_OUT", "IS_CODE_CONV_OUT"], "skip_msg": lambda item, mapping: "Outputがない、またはコード変換処理ではないため検証不可"},
-                39: {"name": "コード・区分変換3", "checks": ["HAS_OUT", "IS_CODE_CONV_OUT"], "skip_msg": lambda item, mapping: "Outputがない、またはコード変換処理ではないため検証不可"},
-                42: {"name": "Outputチェック", "checks": ["HAS_OUT"], "skip_msg": lambda item, mapping: "Outputがないため検証不可"}
+                10: {"name": "最大(指定)桁数", "checks": ["HAS_IN"], "skip_msg": lambda item, mapping: "入力項目がないため検証不可"},
+                11: {"name": "指定桁数(固定長)未満", "checks": ["HAS_IN"], "skip_msg": lambda item, mapping: "入力項目がないため検証不可"},
+                12: {"name": "桁あふれ", "checks": ["IS_NOT_X_FIXED_LENGTH", "HAS_IN", "HAS_OUT"], "skip_msg": lambda item, mapping: "固定長のため検証不可" if item.get('x_val') == "固定長" else "入力項目がないため検証不可"},
+                13: {"name": "記号混在", "checks": ["HAS_IN"], "skip_msg": lambda item, mapping: "入力項目がないため検証不可"},
+                14: {"name": "データ型不整合混在", "checks": ["HAS_IN"], "skip_msg": lambda item, mapping: "入力項目がないため検証不可"},
+                15: {"name": "全角文字混在", "checks": ["IS_TEXT_ZENKAKU_IN"], "skip_msg": lambda item, mapping: "「文字型(全角)/Text」項目がないため検証不可"},
+                16: {"name": "全項目値無", "checks": ["HAS_IN"], "skip_msg": lambda item, mapping: "入力項目がないため検証不可"},
+                17: {"name": "0の場合", "checks": ["IS_NUM_IN"], "skip_msg": lambda item, mapping: "数値型がある入力項目がないため検証不可"},
+                18: {"name": "+の場合", "checks": ["IS_NUM_IN"], "skip_msg": lambda item, mapping: "数値型がある入力項目がないため検証不可"},
+                19: {"name": "-の場合", "checks": ["IS_NUM_IN", "HAS_X_IN"], "skip_msg": lambda item, mapping: "マイナス項目がないため検証不可"},
+                20: {"name": "小数点", "checks": ["IS_NUM_IN", "HAS_GT0_IN"], "skip_msg": lambda item, mapping: "小数点項目がないため検証不可"},
+                
+                22: {"name": "InputのみNG", "checks": ["HAS_IN", "HAS_OUT"], "skip_msg": lambda item, mapping: "入力項目がないため検証不可"},
+                
+                25: {"name": "Outputチェック", "checks": ["HAS_OUT"], "skip_msg": lambda item, mapping: "入力項目がないため検証不可"},
+                26: {"name": "Output 0の場合", "checks": ["IS_NUM_OUT"], "skip_msg": lambda item, mapping: "数値型がある入力項目がないため検証不可"},
+                27: {"name": "Output +の場合", "checks": ["IS_NUM_OUT"], "skip_msg": lambda item, mapping: "数値型がある入力項目がないため検証不可"},
+                28: {"name": "Output -の場合", "checks": ["IS_NUM_OUT", "HAS_X_OUT"], "skip_msg": lambda item, mapping: "マイナス項目がないため検証不可"},
+                29: {"name": "Output 小数点", "checks": ["IS_NUM_OUT", "HAS_GT0_OUT"], "skip_msg": lambda item, mapping: "小数点項目がないため検証不可"},
+                
+                30: {"name": "固定長ファイル", "checks": ["IS_NUM_OUT", "IS_OUT_FIXED_LENGTH"], "skip_msg": lambda item, mapping: "出力ファイルが固定長でないため検証不可" if item.get('ap_val') != "固定長" else "入力項目がないため検証不可"},
+                31: {"name": "可変長ファイル（入力ファイルが固定長の場合）", "checks": ["IS_NOT_X_FIXED_LENGTH", "IS_NUM_OUT", "IS_OUT_NOT_FIXED_LENGTH"], "skip_msg": lambda item, mapping: get_mapping_message(item)},
+                
+                33: {"name": "固定値", "checks": ["HAS_OUT", "NOT_HAS_IN"], "skip_msg": lambda item, mapping: "固定値項目がないため検証不可"},
+                
+                35: {"name": "コード・区分変換1", "checks": ["HAS_OUT", "IS_CODE_CONV_OUT"], "skip_msg": lambda item, mapping: "コード変換処理がないため検証不可"},
+                36: {"name": "コード・区分変換2", "checks": ["HAS_OUT", "IS_CODE_CONV_OUT"], "skip_msg": lambda item, mapping: "コード変換処理がないため検証不可"},
+                37: {"name": "コード・区分変換3", "checks": ["HAS_OUT", "IS_CODE_CONV_OUT"], "skip_msg": lambda item, mapping: "コード変換処理がないため検証不可"},
+                
+                42: {"name": "Outputチェック", "checks": ["HAS_OUT"], "skip_msg": lambda item, mapping: "入力項目がないため検証不可"}
             },
             "テスト計画書兼結果報告書(共通)": {
                 35: {"name": "コード・区分変換", "checks": ["COMMON_CODE_CONV_GRAYOUT"], "skip_msg": lambda item, mapping: "コード変換処理がないため検証不可"}
@@ -178,6 +196,8 @@ def generate_testcase(input_ids=None, target_date=None):
         if_type_raw = str(row[9]).strip().upper() if pd.notnull(row[9]) else ""
         # Lấy giá trị cột X (index 23)
         x_val = str(row[23]).strip() if pd.notnull(row[23]) else ""
+
+        ap_val = str(row[41]).strip() if pd.notnull(row[41]) else ""
         # Lấy giá trị cột AQ (index 42)
         aq_val = str(row[42]).strip() if pd.notnull(row[42]) else ""
         
@@ -188,7 +208,7 @@ def generate_testcase(input_ids=None, target_date=None):
         for t_key in template_keys:
             testcase_items.append({
                 'if_ag_id': if_ag_id, 'if_id': str(row[2]).strip(), 'if_name': str(row[3]).strip(),
-                'template_key': t_key, 'aq_val': aq_val, 'x_val': x_val,
+                'template_key': t_key, 'aq_val': aq_val, 'x_val': x_val, ap_val: ap_val,
                 'master_row': row  # Lưu toàn bộ dữ liệu dòng để mapping sau
             })
 
@@ -202,8 +222,6 @@ def generate_testcase(input_ids=None, target_date=None):
         existing_design_files = os.listdir(design_docs_dir) if os.path.exists(design_docs_dir) else []
         for item in testcase_items:
             if_ag_id, if_id, template_key = item['if_ag_id'], item['if_id'], item['template_key']
-            is_fixed_length = (item.get('aq_val', '') == "固定長")
-            is_x_fixed_length = (item.get('x_val', '') == "固定長")
             
             template_path = os.path.abspath(TEMPLATE_MAP.get(template_key, TEMPLATE_MAP["FtoF"]))
             if not os.path.exists(template_path):
@@ -280,6 +298,7 @@ def generate_testcase(input_ids=None, target_date=None):
                                     in_t_raw = str(v_i).strip() if v_i else ""
                                     in_t_norm = in_t_raw.replace(' ', '').replace('　', '').replace('／', '/')
                                     is_num = (in_t_norm == "数値型/Number")
+                                    is_text_zenkaku = (in_t_norm == "文字型(全角)/Text")
 
                                     # Chuẩn hóa chuỗi Output Type
                                     out_t_raw = str(v_ab).strip() if v_ab else ""
@@ -290,7 +309,7 @@ def generate_testcase(input_ids=None, target_date=None):
                                         'in_seq':v_b, 'in_name':v_c, 'in_type':v_i, 
                                         'in_k':v_k, 'in_l':v_l, 'out_seq':v_u, 'out_name':v_v, 'out_type': v_ab, 
                                         'out_ad': v_ad, 'out_ae': v_ae, 'out_ag': v_ag,
-                                        'is_num': is_num, 'is_num_out': is_num_out
+                                        'is_num': is_num, 'is_text_zenkaku': is_text_zenkaku, 'is_num_out': is_num_out
                                     })
                                     last_row_idx = i
                                 elif any(v is not None for v in [v_b, v_c, v_u, v_v]): last_row_idx = i
@@ -369,7 +388,7 @@ def generate_testcase(input_ids=None, target_date=None):
 
                                         last_col_idx = 8 + total_items - 1
                                         s_test_report.range(s_test_report.cells(2,8), s_test_report.cells(5, last_col_idx)).value = header_data
-                                        for r in sheet_rules.keys():
+                                        for r, cfg in sheet_rules.items():
                                             rg = s_test_report.range(s_test_report.cells(r,8), s_test_report.cells(r, last_col_idx))
                                             rg.value = row_vals[r]
                                             if all(v == s_ng['val'] for v in row_vals[r]):
