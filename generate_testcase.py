@@ -51,18 +51,59 @@ def evaluate_rule(rule_name, item, data, has_code_conv=False):
         return "Inputが文字型(全角)ではない" if not data.get('is_text_zenkaku') else None
     elif rule_name == "IS_NUM_OUT":
         return "Outputが数値型ではない" if not data.get('is_num_out') else None
-    elif rule_name == "HAS_X_IN":
+    
+    elif rule_name == "HAS_NEGATIVE_IN":
+        in_l = str(data.get('in_l', '')).upper() if pd.notnull(data.get('in_l')) else ""
+
+        return "Inputにマイナス項目がない" if "X" not in in_l else None
+
+    elif rule_name == "HAS_NEGATIVE_OUT":
+        out_ae = str(data.get('out_ae', '')).upper() if pd.notnull(data.get('out_ae')) else ""
+
+        return "Outputにマイナス項目がない" if "X" not in out_ae else None
+    
+    elif rule_name == "HAS_DECIMAL_IN":
         in_k = str(data.get('in_k', '')).upper() if pd.notnull(data.get('in_k')) else ""
-        return "Inputにマイナス項目がない" if "S" not in in_k and "-" not in in_k else None
+        try:
+            ad_val = float(in_k)
+        except ValueError:
+            ad_val = 0.0
+            
+        if ad_val <= 0:
+            return "inputに小数点がない"
+        
+        return None
+    
     elif rule_name == "HAS_GT0_IN":
         in_l = str(data.get('in_l', '')).strip() if pd.notnull(data.get('in_l')) else ""
         return "Inputに小数点がない" if in_l in ["", "0", "-"] else None
     elif rule_name == "HAS_X_OUT":
         out_ad = str(data.get('out_ad', '')).upper() if pd.notnull(data.get('out_ad')) else ""
         return "Outputにマイナス項目がない" if "S" not in out_ad and "-" not in out_ad else None
-    elif rule_name == "HAS_GT0_OUT":
-        out_ae = str(data.get('out_ae', '')).strip() if pd.notnull(data.get('out_ae')) else ""
-        return "Outputに小数点がない" if out_ae in ["", "0", "-"] else None
+    elif rule_name == "HAS_DECIMAL_OUT":
+        out_ad = str(data.get('out_ad', '')).strip() if pd.notnull(data.get('out_ad')) else ""
+        out_ah = str(data.get('out_ah', '')).strip() if pd.notnull(data.get('out_ah')) else ""
+        out_w = str(data.get('out_w', '')).strip() if pd.notnull(data.get('out_w')) else ""
+        
+        # 1. Check cột AD xem có > 0 không (ép kiểu float an toàn)
+        try:
+            ad_val = float(out_ad)
+        except ValueError:
+            ad_val = 0.0
+            
+        if ad_val <= 0:
+            return "Outputに小数点がない"
+            
+        # 2. Nếu AD > 0, check tiếp AH xem có chứa "小数点なし" không
+        if "小数点なし" in out_ah:
+            return "Outputに小数点がない"
+            
+        # 3. Check sample data (Cột W), nếu có data thì phải chứa dấu "."
+        if out_w and "." not in out_w:
+            return "Outputに小数点がない"
+            
+        return None
+    
     elif rule_name == "IS_CODE_CONV_OUT":
         return "コード変換処理ではない" if not is_code_conv(data.get('out_ag')) else None
     elif rule_name == "COMMON_CODE_CONV_GRAYOUT":
@@ -78,7 +119,10 @@ def generate_testcase(input_ids=None, target_date=None):
 
     # Cấu hình mapping Template
     TEMPLATE_MAP = {
-        "FtoF": "template_FtoF_単体テスト仕様書兼成績書.xlsx",
+        "FtoF": [
+            "template_FtoF_単体テスト仕様書兼成績書.xlsx", # Dùng cho IF đầu tiên
+            "template_FtoF_単体テスト仕様書兼成績書_同一集約No.のIF展開時.xlsx"  # Dùng cho các IF từ thứ 2 trở đi
+        ],
         "DBtoF_1": "template_DBtoF_1_単体テスト仕様書兼成績書.xlsx",
         "DBtoF_2": "template_DBtoF_2_単体テスト仕様書兼成績書.xlsx",
         "FtoDB_1": "template_FtoDB_1_単体テスト仕様書兼成績書.xlsx",
@@ -104,18 +148,18 @@ def generate_testcase(input_ids=None, target_date=None):
                 16: {"name": "全項目値無", "checks": ["HAS_IN"], "skip_msg": lambda item, mapping: "入力項目がないため検証不可"},
                 17: {"name": "0の場合", "checks": ["IS_NUM_IN"], "skip_msg": lambda item, mapping: "数値型がある入力項目がないため検証不可"},
                 18: {"name": "+の場合", "checks": ["IS_NUM_IN"], "skip_msg": lambda item, mapping: "数値型がある入力項目がないため検証不可"},
-                19: {"name": "-の場合", "checks": ["IS_NUM_IN", "HAS_X_IN"], "skip_msg": lambda item, mapping: "マイナス項目がないため検証不可"},
-                20: {"name": "小数点", "checks": ["IS_NUM_IN", "HAS_GT0_IN"], "skip_msg": lambda item, mapping: "小数点項目がないため検証不可"},
+                19: {"name": "-の場合", "checks": ["IS_NUM_IN", "HAS_NEGATIVE_IN"], "skip_msg": lambda item, mapping: "マイナス項目がないため検証不可"},
+                20: {"name": "小数点", "checks": ["IS_NUM_IN", "HAS_DECIMAL_IN"], "skip_msg": lambda item, mapping: "小数点項目がないため検証不可"},
                 
-                22: {"name": "InputのみNG", "checks": ["HAS_IN", "HAS_OUT"], "skip_msg": lambda item, mapping: "入力項目がないため検証不可"},
+                22: {"name": "InputのみNG", "checks": ["HAS_OUT"], "skip_msg": lambda item, mapping: "入力項目がないため検証不可"},
                 
                 25: {"name": "Outputチェック", "checks": ["HAS_OUT"], "skip_msg": lambda item, mapping: "入力項目がないため検証不可"},
                 26: {"name": "Output 0の場合", "checks": ["IS_NUM_OUT"], "skip_msg": lambda item, mapping: "数値型がある入力項目がないため検証不可"},
                 27: {"name": "Output +の場合", "checks": ["IS_NUM_OUT"], "skip_msg": lambda item, mapping: "数値型がある入力項目がないため検証不可"},
-                28: {"name": "Output -の場合", "checks": ["IS_NUM_OUT", "HAS_X_OUT"], "skip_msg": lambda item, mapping: "マイナス項目がないため検証不可"},
-                29: {"name": "Output 小数点", "checks": ["IS_NUM_OUT", "HAS_GT0_OUT"], "skip_msg": lambda item, mapping: "小数点項目がないため検証不可"},
+                28: {"name": "Output -の場合", "checks": ["IS_NUM_OUT", "HAS_NEGATIVE_OUT"], "skip_msg": lambda item, mapping: "マイナス項目がないため検証不可"},
+                29: {"name": "Output 小数点", "checks": ["IS_NUM_OUT", "HAS_DECIMAL_OUT"], "skip_msg": lambda item, mapping: "小数点項目がないため検証不可"},
                 
-                30: {"name": "固定長ファイル", "checks": ["IS_NUM_OUT", "IS_OUT_FIXED_LENGTH"], "skip_msg": lambda item, mapping: "出力ファイルが固定長でないため検証不可" if item.get('ap_val') != "固定長" else "入力項目がないため検証不可"},
+                30: {"name": "固定長ファイル", "checks": ["IS_NUM_OUT", "IS_OUT_FIXED_LENGTH", "NOT_HAS_IN"], "skip_msg": lambda item, mapping: "出力ファイルが固定長でないため検証不可" if item.get('ap_val') != "固定長" else "入力項目がないため検証不可"},
                 31: {"name": "可変長ファイル（入力ファイルが固定長の場合）", "checks": ["IS_NOT_X_FIXED_LENGTH", "IS_NUM_OUT", "IS_OUT_NOT_FIXED_LENGTH"], "skip_msg": lambda item, mapping: get_mapping_message(item)},
                 
                 33: {"name": "固定値", "checks": ["HAS_OUT", "NOT_HAS_IN"], "skip_msg": lambda item, mapping: "固定値項目がないため検証不可"},
@@ -220,16 +264,24 @@ def generate_testcase(input_ids=None, target_date=None):
     
     try:
         existing_design_files = os.listdir(design_docs_dir) if os.path.exists(design_docs_dir) else []
-        for item in testcase_items:
+        for idx, item in enumerate(testcase_items):
             if_ag_id, if_id, template_key = item['if_ag_id'], item['if_id'], item['template_key']
             
-            template_path = os.path.abspath(TEMPLATE_MAP.get(template_key, TEMPLATE_MAP["FtoF"]))
+            template_mapped = TEMPLATE_MAP.get(template_key, TEMPLATE_MAP["FtoF"])
+            if isinstance(template_mapped, list):
+                # Item đầu tiên của testcase_items (index = 0) dùng template 1, từ item thứ 2 trở đi dùng template 2
+                template_name = template_mapped[0] if idx == 0 else template_mapped[-1]
+            else:
+                template_name = template_mapped
+                
+            print(template_name)
+            template_path = os.path.abspath(template_name)
             if not os.path.exists(template_path):
                 print(f"Bỏ qua IF {if_id}: Không tìm thấy template {template_path}")
                 continue
 
             # Đưa tên template_key vào tên file để không bị ghi đè lên nhau
-            file_name = f"単体テスト仕様書兼成績書_{template_key}_{if_ag_id}_{if_id}.xlsx"
+            file_name = f"単体テスト仕様書兼成績書_{if_ag_id}_{if_id}.xlsx"
             out_p = os.path.join(output_dir, file_name)
             found_design = next((f for f in existing_design_files if if_ag_id in f), None)
 
@@ -269,6 +321,8 @@ def generate_testcase(input_ids=None, target_date=None):
 
                 # 2. Copy Mapping Sheet
                 if found_design:
+
+                    
                     wb_src = app.books.open(os.path.join(design_docs_dir, found_design), update_links=False, read_only=True)
                     try:
                         ss = next((s for s in wb_src.sheets if "マッピング定義" in s.name), None)
@@ -284,15 +338,17 @@ def generate_testcase(input_ids=None, target_date=None):
                             except: pass
 
                             mapping_data = []
-                            # Đọc đến cột AG (index 32) để lấy đầy đủ thuộc tính Output (bao gồm AG chứa loại mapping)
-                            data_block = new_s.range('A8:AG1000').value
+                            # Đọc đến cột AH (index 33) để lấy đầy đủ thuộc tính Output (bao gồm AH và W)
+                            data_block = new_s.range('A8:AH1000').value
                             last_row_idx = 0
                             for i, row_data in enumerate(data_block):
                                 # B=1, C=2, I=8, K=10, L=11, U=20, V=21, AB=27, AD=29, AE=30, AG=32
                                 v_b, v_c, v_i, v_k, v_l, v_u, v_v, v_ab = row_data[1], row_data[2], row_data[8], row_data[10], row_data[11], row_data[20], row_data[21], row_data[27]
+                                v_w = row_data[22] if len(row_data) > 22 else None
                                 v_ad = row_data[29] if len(row_data) > 29 else None
                                 v_ae = row_data[30] if len(row_data) > 30 else None
                                 v_ag = row_data[32] if len(row_data) > 32 else None
+                                v_ah = row_data[33] if len(row_data) > 33 else None
                                 if is_numeric(v_b) or is_numeric(v_u):
                                     # Chuẩn hóa chuỗi Input Type
                                     in_t_raw = str(v_i).strip() if v_i else ""
@@ -308,13 +364,14 @@ def generate_testcase(input_ids=None, target_date=None):
                                     mapping_data.append({
                                         'in_seq':v_b, 'in_name':v_c, 'in_type':v_i, 
                                         'in_k':v_k, 'in_l':v_l, 'out_seq':v_u, 'out_name':v_v, 'out_type': v_ab, 
-                                        'out_ad': v_ad, 'out_ae': v_ae, 'out_ag': v_ag,
+                                        'out_w': v_w, 'out_ad': v_ad, 'out_ae': v_ae, 'out_ag': v_ag, 'out_ah': v_ah,
                                         'is_num': is_num, 'is_text_zenkaku': is_text_zenkaku, 'is_num_out': is_num_out
                                     })
                                     last_row_idx = i
                                 elif any(v is not None for v in [v_b, v_c, v_u, v_v]): last_row_idx = i
                                 if i > last_row_idx + 20: break
                             
+                            print(f"  -> Số lượng item trong Mapping: {len(mapping_data)}")
                             total_items = len(mapping_data)
                             if total_items > 0:
                                 current_template_config = PATTERN_CONFIGS.get(template_key, PATTERN_CONFIGS["FtoF"])
@@ -346,6 +403,9 @@ def generate_testcase(input_ids=None, target_date=None):
 
                                     # --- Xử lý cho sheet (マッピング) ---
                                     elif "マッピング" in target_sheet_name:
+                                        # Bỏ qua xử lý sheet マッピング nếu đang dùng Template 2 trở đi (idx > 0)
+                                        if idx > 0: continue
+
                                         if total_items > 1:
                                             s_test_report.api.Columns(8).Copy()
                                             target_range = s_test_report.api.Range(s_test_report.api.Columns(9), s_test_report.api.Columns(8 + total_items - 1))
@@ -388,25 +448,39 @@ def generate_testcase(input_ids=None, target_date=None):
 
                                         last_col_idx = 8 + total_items - 1
                                         s_test_report.range(s_test_report.cells(2,8), s_test_report.cells(5, last_col_idx)).value = header_data
+                                       
                                         for r, cfg in sheet_rules.items():
                                             rg = s_test_report.range(s_test_report.cells(r,8), s_test_report.cells(r, last_col_idx))
                                             rg.value = row_vals[r]
+                                            
+
                                             if all(v == s_ng['val'] for v in row_vals[r]):
                                                 s_test_report.range(s_test_report.cells(r,4), s_test_report.cells(r, last_col_idx + 1)).color = (166,166,166)
                                                 
-                                                unique_reasons = list(dict.fromkeys(row_reasons[r]))
+                                                # unique_reasons = list(dict.fromkeys(row_reasons[r]))
                                                 skip_func = cfg.get("skip_msg")
                                                 if callable(skip_func):
                                                     skip_msg = skip_func(item, mapping_data)
                                                 else:
-                                                    if unique_reasons:
-                                                        skip_msg = "、".join(unique_reasons) + "ため検証不可"
-                                                    else:
-                                                        skip_msg = "対象項目がないため検証不可"
+                                                    # if unique_reasons:
+                                                    #     skip_msg = "、".join(unique_reasons) + "ため検証不可"
+                                                    # else:
+                                                    #     skip_msg = "対象項目がないため検証不可"
+                                                    skip_msg = "対象項目がないため検証不可"
                                                     
                                                 s_test_report.cells(r, last_col_idx + 1).value = skip_msg
                                             else:
-                                                for idx, color in enumerate(row_cols[r]): rg[idx].color = color
+                                                colors = row_cols[r]
+                                                if colors:
+                                                    ok_color, ng_color = s_ok['color'], s_ng['color']
+                                                    majority_color = ok_color if colors.count(ok_color) > len(colors) // 2 else ng_color
+                                                    
+                                                    rg.color = majority_color
+                                                    for idx, color in enumerate(colors):
+                                                        if color != majority_color:
+                                                            rg[idx].color = color
+                                        
+                                        s_test_report.range('A3:A4').clear()
 
                     finally: wb_src.close()
 
