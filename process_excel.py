@@ -174,7 +174,12 @@ def process_excel(input_ids=None, target_date=None):
                 for s in wb_out.sheets:
                     try:
                         s.activate()
-                        s.range('A1').select()
+                        # Với sheet mapping có FreezePanes, chỉ select để tránh lỗi RPC
+                        if "IFA_マッピング定義" in s.name:
+                            s.range('A1').select()
+                        else:
+                            # Với các sheet khác, Goto an toàn và hiệu quả
+                            app.api.Goto(s.range('A1').api, True)
                     except: pass
                 
                 wb_out.sheets[0].activate()

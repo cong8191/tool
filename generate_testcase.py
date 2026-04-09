@@ -404,7 +404,20 @@ def generate_testcase(input_ids=None, target_date=None):
                                     # --- Xử lý cho sheet (マッピング) ---
                                     elif "マッピング" in target_sheet_name:
                                         # Bỏ qua xử lý sheet マッピング nếu đang dùng Template 2 trở đi (idx > 0)
-                                        if idx > 0: continue
+                                        
+                                        
+                                        
+                                        if idx > 0: 
+                                            val_e14 = s_test_report.range('E14').value
+                                            if val_e14:
+                                                s_test_report.range('E14').value = str(val_e14).replace("■展開元IF：XXXXX", f"■展開元IF：{testcase_items[0]['if_id']}")  # Cập nhật tên IF ở phần header    
+                                            val_e16 = s_test_report.range('E16').value
+                                            if val_e16:
+                                                s_test_report.range('E16').value = str(val_e16).replace("■展開元IF：XXXXX", f"■展開元IF：{testcase_items[0]['if_id']}")  # Cập nhật tên IF ở phần header    
+                                            
+                                            
+                                            
+                                            continue
 
                                         if total_items > 1:
                                             s_test_report.api.Columns(8).Copy()
