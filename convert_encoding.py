@@ -5,23 +5,103 @@ import os
 import shutil
 import subprocess
 
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
+
 def try_fallback_tools(input_path, output_path, from_enc, to_enc, keep_sosi=False):
     """Tự động tìm và gọi công cụ iconv hoặc java có sẵn trên Windows"""
     from_enc_lower = from_enc.lower()
     to_enc_lower = to_enc.lower()
 
-    # Ánh xạ tên encoding cho iconv và java
-    if from_enc_lower == 'cp930': iconv_from, java_from = 'IBM930', 'Cp930'
-    elif from_enc_lower == 'cp939': iconv_from, java_from = 'IBM939', 'Cp939'
-    elif from_enc_lower in ['cp20290', 'ibm20290']: iconv_from, java_from = 'IBM290', 'x-IBM290'
-    elif from_enc_lower in ['cp290', 'ibm290']: iconv_from, java_from = 'IBM290', 'x-IBM290'
-    else: iconv_from, java_from = from_enc, from_enc
+    if from_enc_lower in ['cp930', 'ibm930']: iconv_from, java_from, mixed_enc = 'IBM930', 'Cp930', 'Cp930'
+    elif from_enc_lower in ['cp939', 'ibm939']: iconv_from, java_from, mixed_enc = 'IBM939', 'Cp939', 'Cp939'
+    elif from_enc_lower in ['cp20290', 'ibm20290', 'cp290', 'ibm290']: iconv_from, java_from, mixed_enc = 'IBM290', 'Cp290', 'Cp930'
+    else: iconv_from, java_from, mixed_enc = from_enc, from_enc, from_enc
 
     iconv_to = 'SHIFT-JIS' if to_enc_lower in ['shift_jis', 'sjis', 'cp932'] else to_enc
 
     java_to = 'MS932' if to_enc_lower in ['shift_jis', 'sjis', 'cp932'] else ('UTF-8' if to_enc_lower == 'utf-8' else to_enc)
 
-    # 1. Thử dùng iconv (thường có sẵn nếu cài Git Bash)
+    # 1. Ưu tiên thử dùng Java trước (do xử lý EBCDIC tốt hơn)
+    if shutil.which('java') and shutil.which('javac'):
+        print("\n--- Đang tự động dùng Java để thực hiện chuyển đổi thay cho Python... ---")
+        if keep_sosi:
+            print("--- Kích hoạt chế độ thay thế SOSI bằng space (0x20) ---")
+            java_code = f"""import java.io.ByteArrayOutputStream; import java.nio.file.Files; import java.nio.file.Paths; import java.util.Arrays; import java.nio.charset.Charset;
+            public class TmpConverter {{ public static void main(String[] args) throws Exception {{
+                String mixedEnc = "{mixed_enc}";
+                if (!Charset.isSupported(mixedEnc)) {{
+                    String[] fallbacks = {{"Cp930", "IBM930", "x-IBM930", "Cp939", "IBM939", "x-IBM939"}};
+                    for (String enc : fallbacks) {{
+                        if (Charset.isSupported(enc)) {{ mixedEnc = enc; break; }}
+                    }}
+                }}
+                byte[] input = Files.readAllBytes(Paths.get(args[0]));
+                ByteArrayOutputStream out = new ByteArrayOutputStream();
+                int start = 0; boolean isDbcs = false;
+                for (int i = 0; i < input.length; i++) {{
+                    if (input[i] == 0x0E) {{
+                        if (i > start) {{
+                            byte[] chunk = Arrays.copyOfRange(input, start, i);
+                            out.write(new String(chunk, mixedEnc).getBytes("{java_to}"));
+                        }}
+                        out.write(0x20); start = i + 1; isDbcs = true;
+                    }} else if (input[i] == 0x0F) {{
+                        if (i > start) {{
+                            byte[] chunk = Arrays.copyOfRange(input, start, i);
+                            byte[] wrapped = new byte[chunk.length + 2];
+                            wrapped[0] = 0x0E;
+                            System.arraycopy(chunk, 0, wrapped, 1, chunk.length);
+                            wrapped[wrapped.length - 1] = 0x0F;
+                            out.write(new String(wrapped, mixedEnc).getBytes("{java_to}"));
+                        }}
+                        out.write(0x20); start = i + 1; isDbcs = false;
+                    }}
+                }}
+                if (start < input.length) {{
+                    byte[] chunk = Arrays.copyOfRange(input, start, input.length);
+                    if (isDbcs) {{
+                        byte[] wrapped = new byte[chunk.length + 2];
+                        wrapped[0] = 0x0E;
+                        System.arraycopy(chunk, 0, wrapped, 1, chunk.length);
+                        wrapped[wrapped.length - 1] = 0x0F;
+                        out.write(new String(wrapped, mixedEnc).getBytes("{java_to}"));
+                    }} else {{
+                        out.write(new String(chunk, mixedEnc).getBytes("{java_to}"));
+                    }}
+                }}
+                Files.write(Paths.get(args[1]), out.toByteArray());
+            }} }}"""
+        else:
+            java_code = f"""import java.nio.file.Files; import java.nio.file.Paths; import java.nio.charset.Charset;
+            public class TmpConverter {{ public static void main(String[] args) throws Exception {{
+                String fromEnc = "{java_from}";
+                if (!Charset.isSupported(fromEnc)) {{
+                    String[] fallbacks = {{"x-IBM290", "Cp290", "IBM290", "Cp930", "IBM930", "x-IBM930"}};
+                    for (String enc : fallbacks) {{
+                        if (Charset.isSupported(enc)) {{
+                            fromEnc = enc;
+                            break;
+                        }}
+                    }}
+                }}
+                Files.write(Paths.get(args[1]), new String(Files.readAllBytes(Paths.get(args[0])), fromEnc).getBytes("{java_to}"));
+            }} }}"""
+        with open("TmpConverter.java", "w", encoding="utf-8") as f: f.write(java_code)
+        try:
+            subprocess.run(['javac', 'TmpConverter.java'], check=True)
+            subprocess.run(['java', 'TmpConverter', input_path, output_path], check=True)
+            print("\nChuyển đổi thành công bằng công cụ Java ngầm!")
+            print(f"File kết quả đã được lưu tại: {output_path}")
+            return True
+        except subprocess.CalledProcessError as e: print(f"Lỗi khi chạy Java: {e}", file=sys.stderr)
+        finally:
+            if os.path.exists("TmpConverter.java"): os.remove("TmpConverter.java")
+            if os.path.exists("TmpConverter.class"): os.remove("TmpConverter.class")
+
+    # 2. Thử dùng iconv nếu Java thất bại (hoặc không cài)
     iconv_path = shutil.which('iconv')
     if not iconv_path and os.path.exists(r"C:\Program Files\Git\usr\bin\iconv.exe"):
         iconv_path = r"C:\Program Files\Git\usr\bin\iconv.exe"
@@ -38,47 +118,6 @@ def try_fallback_tools(input_path, output_path, from_enc, to_enc, keep_sosi=Fals
             return True
         except subprocess.CalledProcessError as e:
             print(f"Lỗi khi chạy iconv: {e}", file=sys.stderr)
-
-    # 2. Thử dùng Java (nếu máy có cài JDK)
-    if shutil.which('java') and shutil.which('javac'):
-        print("\n--- Đang tự động dùng Java để thực hiện chuyển đổi thay cho Python... ---")
-        if keep_sosi:
-            print("--- Kích hoạt chế độ giữ lại Shift-Out(0x0E) và Shift-In(0x0F) ---")
-            sbcs_enc = java_from if java_from != 'Cp930' else 'x-IBM290'
-            dbcs_enc = 'x-IBM300' # DBCS chuẩn cho mainframe Nhật
-            java_code = f"""import java.io.ByteArrayOutputStream; import java.nio.file.Files; import java.nio.file.Paths; import java.util.Arrays;
-            public class TmpConverter {{ public static void main(String[] args) throws Exception {{
-                byte[] input = Files.readAllBytes(Paths.get(args[0]));
-                ByteArrayOutputStream out = new ByteArrayOutputStream();
-                int start = 0; boolean isDbcs = false;
-                for (int i = 0; i < input.length; i++) {{
-                    if (input[i] == 0x0E) {{
-                        if (i > start) out.write(new String(Arrays.copyOfRange(input, start, i), "{sbcs_enc}").getBytes("{java_to}"));
-                        out.write(0x0E); start = i + 1; isDbcs = true;
-                    }} else if (input[i] == 0x0F) {{
-                        if (i > start) out.write(new String(Arrays.copyOfRange(input, start, i), "{dbcs_enc}").getBytes("{java_to}"));
-                        out.write(0x0F); start = i + 1; isDbcs = false;
-                    }}
-                }}
-                if (start < input.length) out.write(new String(Arrays.copyOfRange(input, start, input.length), isDbcs ? "{dbcs_enc}" : "{sbcs_enc}").getBytes("{java_to}"));
-                Files.write(Paths.get(args[1]), out.toByteArray());
-            }} }}"""
-        else:
-            java_code = f"""import java.nio.file.Files; import java.nio.file.Paths;
-            public class TmpConverter {{ public static void main(String[] args) throws Exception {{
-                Files.write(Paths.get(args[1]), new String(Files.readAllBytes(Paths.get(args[0])), "{java_from}").getBytes("{java_to}"));
-            }} }}"""
-        with open("TmpConverter.java", "w", encoding="utf-8") as f: f.write(java_code)
-        try:
-            subprocess.run(['javac', 'TmpConverter.java'], check=True)
-            subprocess.run(['java', 'TmpConverter', input_path, output_path], check=True)
-            print("\nChuyển đổi thành công bằng công cụ Java ngầm!")
-            print(f"File kết quả đã được lưu tại: {output_path}")
-            return True
-        except subprocess.CalledProcessError as e: print(f"Lỗi khi chạy Java: {e}", file=sys.stderr)
-        finally:
-            if os.path.exists("TmpConverter.java"): os.remove("TmpConverter.java")
-            if os.path.exists("TmpConverter.class"): os.remove("TmpConverter.class")
 
     return False
 
@@ -169,7 +208,7 @@ Các lựa chọn phổ biến:
     parser.add_argument(
         "--keep-sosi",
         action="store_true",
-        help="Giữ nguyên ký tự điều khiển Shift-Out (0x0E) và Shift-In (0x0F) ở kết quả."
+        help="Thay thế ký tự điều khiển SOSI (0x0E, 0x0F) bằng ký tự space (0x20) để bảo toàn chiều dài."
     )
 
     args = parser.parse_args()

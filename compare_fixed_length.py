@@ -8,6 +8,7 @@ import datetime
 import shutil
 import subprocess
 import tempfile
+import json
 
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
@@ -228,36 +229,14 @@ def main():
         print("Lỗi: Không có dòng data nào để kiểm tra (cần data từ dòng 3 trở đi).")
         return
 
+    results_data = []
     current_offset = 0
+    match_count = 0
+    diff_count = 0
 
     # Duyệt từ dòng 3 đến dòng cuối cùng
     for row_idx in range(start_data_row, sheet.max_row + 1):
         record_index = row_idx - start_data_row
-        
-        field_data_list = []
-        
-        for field in layout:
-            col_idx = field['col']
-            cell = sheet.cell(row=row_idx, column=col_idx)
-            expected_val = cell.value
-            
-            if expected_val is not None:
-                # Format lại data (Không dùng .strip() để bảo toàn nguyên vẹn khoảng trắng bạn đã nhập)
-                if isinstance(expected_val, float) and expected_val.is_integer():
-                    expected_str = str(int(expected_val))
-                elif isinstance(expected_val, datetime.datetime):
-                    expected_str = expected_val.strftime("%Y%m%d")
-                else:
-                    expected_str = str(expected_val)
-                
-                # Encode và tính độ dài byte thực tế
-                expected_bytes = expected_str.encode(args.encoding, errors='replace')
-                
-                field_data_list.append({'cell': cell, 'bytes': expected_bytes, 'str': expected_str, 'has_data': True, 'name': field['name'], 'layout_len': field['length'], 'start_byte': field['start_byte'], 'end_byte': field['end_byte']})
-            else:
-                field_data_list.append({'cell': cell, 'has_data': False, 'name': field['name'], 'layout_len': field['length']})
-
-        # Trích xuất đoạn byte chunk tương ứng với dòng data này
         if use_lines:
             if record_index < len(lines): 
                 chunk_bytes = lines[record_index]
@@ -271,6 +250,11 @@ def main():
             chunk_bytes = output_bytes[start_pos:end_pos]
             current_offset = end_pos # Cộng dồn cho record tiếp theo
             
+        row_result = {
+            'row_index': row_idx,
+            'fields': []
+        }
+        
         # Dữ liệu đã được convert sẵn (SOSI -> space), không cần clean nữa
         chunk_clean = chunk_bytes
 
@@ -283,29 +267,50 @@ def main():
             display_chunk = chunk_clean.decode(args.encoding, errors='replace')
             print(f"   [Data Output]: '{display_chunk}'")
         
-        for f_data in field_data_list:
-            if f_data['has_data']:
-                cell = f_data['cell']
-                expected_bytes = f_data['bytes']
-                expected_str = f_data['str']
-                start_byte = f_data['start_byte']
-                end_byte = f_data['end_byte']
+        for field in layout:
+            # Lấy dữ liệu thực tế từ file output
+            start_byte, end_byte = field['start_byte'], field['end_byte']
+            actual_field_bytes = chunk_clean[start_byte:end_byte]
+            actual_str = actual_field_bytes.decode(args.encoding, errors='replace')
 
-                # Trích xuất chính xác phạm vi byte của field này từ record
-                actual_field_bytes = chunk_clean[start_byte:end_byte]
+            # Lấy dữ liệu mong đợi từ file Excel
+            cell = sheet.cell(row=row_idx, column=field['col'])
+            expected_val = cell.value
+            expected_str = ""
+            has_data = False
 
-                # Kiểm tra giá trị mong muốn có nằm TRONG PHẠM VI của field này không
+            if expected_val is not None:
+                has_data = True
+                if isinstance(expected_val, float) and expected_val.is_integer():
+                    expected_str = str(int(expected_val))
+                elif isinstance(expected_val, datetime.datetime):
+                    expected_str = expected_val.strftime("%Y%m%d")
+                else:
+                    expected_str = str(expected_val)
+            
+            # So sánh và tô màu
+            status = 'empty' # Mặc định là ô trống trong Excel
+            if has_data:
+                expected_bytes = expected_str.encode(args.encoding, errors='replace')
                 if expected_bytes in actual_field_bytes:
                     cell.fill = fill_match
+                    match_count += 1
+                    status = 'match'
                 else:
                     cell.fill = fill_diff
-                    
-                    # In ra log chuỗi thực tế trong file output (đã giải mã) để dễ debug
-                    chunk_str_for_debug = actual_field_bytes.decode(args.encoding, errors='replace')
-                    # Chỉ in 100 ký tự để log không bị quá dài
-                    snippet = chunk_str_for_debug[:100].replace('\r', '').replace('\n', '')
-                    # print(f"      [DIFF] Field '{f_data['name']}' ({start_byte}->{end_byte}) | Excel: '{expected_str}' | Output: '{snippet}'")
-    
+                    diff_count += 1
+                    status = 'diff'
+            
+            row_result['fields'].append({
+                'name': field['name'],
+                'expected': expected_str,
+                'actual': actual_str,
+                'status': status
+            })
+        results_data.append(row_result)
+
+    print(f"[RESULT_JSON]{json.dumps({'layout': layout, 'results': results_data}, ensure_ascii=False)}")
+    print(f"[SUMMARY] Match: {match_count}, Diff: {diff_count}")
     print(f"4. Đang lưu kết quả ra: {args.out_excel}")
     wb.save(args.out_excel)
     print("--- Hoàn tất ---")
