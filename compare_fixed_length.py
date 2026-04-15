@@ -9,50 +9,111 @@ import shutil
 import subprocess
 import tempfile
 
-def try_fallback_tools(input_path, output_path, from_enc, to_enc):
+def try_fallback_tools(input_path, output_path, from_enc, to_enc, keep_sosi=False):
     """Tự động tìm và gọi công cụ iconv hoặc java có sẵn trên Windows để convert"""
     from_enc_lower = from_enc.lower()
     to_enc_lower = to_enc.lower()
 
-    if from_enc_lower == 'cp930': iconv_from, java_from = 'IBM930', 'Cp930'
-    elif from_enc_lower == 'cp939': iconv_from, java_from = 'IBM939', 'Cp939'
-    elif from_enc_lower in ['cp20290', 'ibm20290']: iconv_from, java_from = 'IBM290', 'x-IBM290'
-    elif from_enc_lower in ['cp290', 'ibm290']: iconv_from, java_from = 'IBM290', 'x-IBM290'
-    else: iconv_from, java_from = from_enc, from_enc
+    if from_enc_lower in ['cp930', 'ibm930']: iconv_from, java_from, mixed_enc = 'IBM930', 'Cp930', 'Cp930'
+    elif from_enc_lower in ['cp939', 'ibm939']: iconv_from, java_from, mixed_enc = 'IBM939', 'Cp939', 'Cp939'
+    elif from_enc_lower in ['cp20290', 'ibm20290', 'cp290', 'ibm290']: iconv_from, java_from, mixed_enc = 'IBM290', 'Cp290', 'Cp930'
+    else: iconv_from, java_from, mixed_enc = from_enc, from_enc, from_enc
 
     iconv_to = 'SHIFT-JIS' if to_enc_lower in ['shift_jis', 'sjis', 'cp932'] else to_enc
     java_to = 'MS932' if to_enc_lower in ['shift_jis', 'sjis', 'cp932'] else ('UTF-8' if to_enc_lower == 'utf-8' else to_enc)
 
-    iconv_path = shutil.which('iconv')
-    if not iconv_path and os.path.exists(r"C:\Program Files\Git\usr\bin\iconv.exe"):
-        iconv_path = r"C:\Program Files\Git\usr\bin\iconv.exe"
-
-    if iconv_path:
-        cmd = [iconv_path, '-c', '-f', iconv_from, '-t', iconv_to, '-o', output_path, input_path]
-        try:
-            subprocess.run(cmd, check=True)
-            return True
-        except subprocess.CalledProcessError as e:
-            print(f"Lỗi khi chạy iconv: {e}", file=sys.stderr)
-
+    # 1. Ưu tiên dùng Java trước vì Java xử lý các bảng mã EBCDIC IBM chuẩn xác hơn iconv trên Windows
     if shutil.which('java') and shutil.which('javac'):
-        java_code = f"""import java.nio.file.Files; import java.nio.file.Paths;
-        public class TmpConverter {{ public static void main(String[] args) throws Exception {{
-            Files.write(Paths.get(args[1]), new String(Files.readAllBytes(Paths.get(args[0])), "{java_from}").getBytes("{java_to}"));
-        }} }}"""
+        if keep_sosi:
+            print(" -> [DEBUG] Kích hoạt chế độ giữ lại Shift-Out(0x0E) và Shift-In(0x0F)")
+            java_code = f"""import java.io.ByteArrayOutputStream; import java.nio.file.Files; import java.nio.file.Paths; import java.util.Arrays; import java.nio.charset.Charset;
+            public class TmpConverter {{ public static void main(String[] args) throws Exception {{
+                String mixedEnc = "{mixed_enc}";
+                if (!Charset.isSupported(mixedEnc)) {{
+                    String[] fallbacks = {{"Cp930", "IBM930", "x-IBM930", "Cp939", "IBM939", "x-IBM939"}};
+                    for (String enc : fallbacks) {{
+                        if (Charset.isSupported(enc)) {{ mixedEnc = enc; break; }}
+                    }}
+                }}
+                byte[] input = Files.readAllBytes(Paths.get(args[0]));
+                ByteArrayOutputStream out = new ByteArrayOutputStream();
+                int start = 0; boolean isDbcs = false;
+                for (int i = 0; i < input.length; i++) {{
+                    if (input[i] == 0x0E) {{
+                        if (i > start) {{
+                            byte[] chunk = Arrays.copyOfRange(input, start, i);
+                            out.write(new String(chunk, mixedEnc).getBytes("{java_to}"));
+                        }}
+                        out.write(0x0E); start = i + 1; isDbcs = true;
+                    }} else if (input[i] == 0x0F) {{
+                        if (i > start) {{
+                            byte[] chunk = Arrays.copyOfRange(input, start, i);
+                            byte[] wrapped = new byte[chunk.length + 2];
+                            wrapped[0] = 0x0E;
+                            System.arraycopy(chunk, 0, wrapped, 1, chunk.length);
+                            wrapped[wrapped.length - 1] = 0x0F;
+                            out.write(new String(wrapped, mixedEnc).getBytes("{java_to}"));
+                        }}
+                        out.write(0x0F); start = i + 1; isDbcs = false;
+                    }}
+                }}
+                if (start < input.length) {{
+                    byte[] chunk = Arrays.copyOfRange(input, start, input.length);
+                    if (isDbcs) {{
+                        byte[] wrapped = new byte[chunk.length + 2];
+                        wrapped[0] = 0x0E;
+                        System.arraycopy(chunk, 0, wrapped, 1, chunk.length);
+                        wrapped[wrapped.length - 1] = 0x0F;
+                        out.write(new String(wrapped, mixedEnc).getBytes("{java_to}"));
+                    }} else {{
+                        out.write(new String(chunk, mixedEnc).getBytes("{java_to}"));
+                    }}
+                }}
+                Files.write(Paths.get(args[1]), out.toByteArray());
+            }} }}"""
+        else:
+            java_code = f"""import java.nio.file.Files; import java.nio.file.Paths; import java.nio.charset.Charset;
+            public class TmpConverter {{ public static void main(String[] args) throws Exception {{
+                String fromEnc = "{java_from}";
+                if (!Charset.isSupported(fromEnc)) {{
+                    String[] fallbacks = {{"x-IBM290", "Cp290", "IBM290", "Cp930", "IBM930", "x-IBM930"}};
+                    for (String enc : fallbacks) {{
+                        if (Charset.isSupported(enc)) {{
+                            fromEnc = enc;
+                            break;
+                        }}
+                    }}
+                }}
+                Files.write(Paths.get(args[1]), new String(Files.readAllBytes(Paths.get(args[0])), fromEnc).getBytes("{java_to}"));
+            }} }}"""
         with open("TmpConverter.java", "w", encoding="utf-8") as f: f.write(java_code)
         try:
             subprocess.run(['javac', 'TmpConverter.java'], check=True)
             subprocess.run(['java', 'TmpConverter', input_path, output_path], check=True)
+            print(" -> [DEBUG] Đã dùng Java để convert file thành công.")
             return True
         except subprocess.CalledProcessError as e: print(f"Lỗi khi chạy Java: {e}", file=sys.stderr)
         finally:
             if os.path.exists("TmpConverter.java"): os.remove("TmpConverter.java")
             if os.path.exists("TmpConverter.class"): os.remove("TmpConverter.class")
 
+    # 2. Thử dùng iconv nếu Java lỗi hoặc không có Java
+    iconv_path = shutil.which('iconv')
+    if not iconv_path and os.path.exists(r"C:\Program Files\Git\usr\bin\iconv.exe"):
+        iconv_path = r"C:\Program Files\Git\usr\bin\iconv.exe"
+
+    if iconv_path and not keep_sosi:
+        cmd = [iconv_path, '-c', '-f', iconv_from, '-t', iconv_to, '-o', output_path, input_path]
+        try:
+            subprocess.run(cmd, check=True)
+            print(" -> [DEBUG] Đã dùng iconv để convert file thành công.")
+            return True
+        except subprocess.CalledProcessError as e:
+            print(f"Lỗi khi chạy iconv: {e}", file=sys.stderr)
+
     return False
 
-def convert_file_to_temp(input_path, output_path, from_encoding, to_encoding):
+def convert_file_to_temp(input_path, output_path, from_encoding, to_encoding, keep_sosi=False):
     try:
         with open(input_path, 'rb') as f_in:
             binary_data = f_in.read()
@@ -60,9 +121,10 @@ def convert_file_to_temp(input_path, output_path, from_encoding, to_encoding):
         output_data = decoded_string.encode(to_encoding, errors='replace')
         with open(output_path, 'wb') as f_out:
             f_out.write(output_data)
+        print(" -> [DEBUG] Đã dùng Python thuần để convert file thành công.")
         return True
     except LookupError as e:
-        return try_fallback_tools(input_path, output_path, from_encoding, to_encoding)
+        return try_fallback_tools(input_path, output_path, from_encoding, to_encoding, keep_sosi)
     except Exception as e:
         print(f"Lỗi chuyển đổi: {e}")
         return False
@@ -74,6 +136,7 @@ def main():
     parser.add_argument("--out_excel", default="Result.xlsx", help="Đường dẫn file Excel xuất ra báo cáo (Mặc định: Result.xlsx).")
     parser.add_argument("--encoding", default="shift_jis", help="Bảng mã file text (Mặc định: shift_jis).")
     parser.add_argument("--from_enc", default=None, help="Bảng mã gốc của file Output (VD: cp20290). Nếu có, tool sẽ tự động convert trước khi xử lý.")
+    parser.add_argument("--keep_sosi", action="store_true", help="Giữ nguyên ký tự điều khiển Shift-Out (0x0E) và Shift-In (0x0F) để bảo toàn chiều dài byte.")
     
     args = parser.parse_args()
     
@@ -117,27 +180,28 @@ def main():
 
     print("2. Đang đọc file Output...")
     output_file_to_read = args.output
-    temp_file_path = None
 
     if args.from_enc:
         print(f" -> Tự động convert output từ '{args.from_enc}' sang '{args.encoding}'...")
-        fd, temp_file_path = tempfile.mkstemp(suffix=".txt")
-        os.close(fd)
         
-        if convert_file_to_temp(args.output, temp_file_path, args.from_enc, args.encoding):
-            output_file_to_read = temp_file_path
+        # Đổi thành lưu file cố định để user có thể mở lên xem nội dung đã convert
+        base_name, _ = os.path.splitext(args.output)
+        converted_file_path = f"{base_name}_converted.txt"
+        
+        if convert_file_to_temp(args.output, converted_file_path, args.from_enc, args.encoding, args.keep_sosi):
+            output_file_to_read = converted_file_path
+            print(f" -> [DEBUG] File convert thành công. Đã lưu bản sao tại: {converted_file_path}")
         else:
             print("Lỗi: Convert thất bại. Vui lòng kiểm tra lại môi trường hoặc bảng mã.")
-            if os.path.exists(temp_file_path):
-                os.remove(temp_file_path)
             return
 
     with open(output_file_to_read, 'rb') as f:
         output_bytes = f.read()
 
-    # Dọn dẹp file temp ngay sau khi đọc xong bộ nhớ
-    if temp_file_path and os.path.exists(temp_file_path):
-        os.remove(temp_file_path)
+    if args.from_enc:
+        # Loại bỏ SOSI (0x0E, 0x0F) để preview không bị lỗi font khi decode Shift-JIS
+        preview_str = output_bytes[:500].replace(b'\x0E', b'').replace(b'\x0F', b'').decode(args.encoding, errors='replace')
+        print(f" -> [PREVIEW NỘI DUNG SAU CONVERT (500 byte đầu)]:\n{preview_str}\n" + "-"*50)
 
     # Nhận diện xem file output có ký tự xuống dòng hay không
     use_lines = False
@@ -201,12 +265,16 @@ def main():
             else:
                 chunk_bytes = b"" # Output không đủ dòng
         else:
-            # Nếu dòng Excel trống hoàn toàn (row_total_bytes = 0), mượn tạm layout_total_bytes để cắt block output tiếp theo
-            slice_length = layout_total_bytes if row_total_bytes == 0 else row_total_bytes
+            # Luôn cắt block theo chiều dài chuẩn của layout để đảm bảo không bị lệch Record
+            slice_length = layout_total_bytes
             start_pos = current_offset
             end_pos = start_pos + slice_length
             chunk_bytes = output_bytes[start_pos:end_pos]
             current_offset = end_pos # Cộng dồn cho record tiếp theo
+            
+        # Loại bỏ ký tự SOSI (0x0E, 0x0F) ra khỏi chunk để việc decode và match chuỗi Shift-JIS không bị gãy đoạn
+        chunk_clean = chunk_bytes.replace(b'\x0E', b'').replace(b'\x0F', b'')
+
         print(current_offset)
         print(f" - Đang kiểm tra dòng {row_idx} (Record {record_index + 1}) | Chiều dài tự tính: {row_total_bytes} bytes")
         
@@ -222,8 +290,8 @@ def main():
         if not chunk_bytes:
             print(f"   -> Cảnh báo: File output không có đủ data cho record {record_index + 1}")
         else:
-            display_chunk = chunk_bytes.decode(args.encoding, errors='replace').replace('\r', '').replace('\n', '')
-            # print(f"   [Data Output]: '{display_chunk}'")
+            display_chunk = chunk_clean.decode(args.encoding, errors='replace')
+            print(f"   [Data Output]: '{display_chunk}'")
         
         for f_data in field_data_list:
             if f_data['has_data']:
@@ -231,7 +299,7 @@ def main():
                 expected_bytes = f_data['bytes']
                 expected_str = f_data['str']
 
-                if expected_bytes in chunk_bytes:
+                if expected_bytes in chunk_clean:
                     cell.fill = fill_match
                 else:
                     cell.fill = fill_diff
