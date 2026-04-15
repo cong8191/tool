@@ -9,6 +9,11 @@ import shutil
 import subprocess
 import tempfile
 
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
+
 def try_fallback_tools(input_path, output_path, from_enc, to_enc, keep_sosi=False):
     """Tự động tìm và gọi công cụ iconv hoặc java có sẵn trên Windows để convert"""
     from_enc_lower = from_enc.lower()
@@ -25,7 +30,7 @@ def try_fallback_tools(input_path, output_path, from_enc, to_enc, keep_sosi=Fals
     # 1. Ưu tiên dùng Java trước vì Java xử lý các bảng mã EBCDIC IBM chuẩn xác hơn iconv trên Windows
     if shutil.which('java') and shutil.which('javac'):
         if keep_sosi:
-            print(" -> [DEBUG] Kích hoạt chế độ giữ lại Shift-Out(0x0E) và Shift-In(0x0F)")
+            print(" -> [DEBUG] Kích hoạt chế độ thay thế SOSI bằng space (0x20)")
             java_code = f"""import java.io.ByteArrayOutputStream; import java.nio.file.Files; import java.nio.file.Paths; import java.util.Arrays; import java.nio.charset.Charset;
             public class TmpConverter {{ public static void main(String[] args) throws Exception {{
                 String mixedEnc = "{mixed_enc}";
@@ -44,7 +49,7 @@ def try_fallback_tools(input_path, output_path, from_enc, to_enc, keep_sosi=Fals
                             byte[] chunk = Arrays.copyOfRange(input, start, i);
                             out.write(new String(chunk, mixedEnc).getBytes("{java_to}"));
                         }}
-                        out.write(0x0E); start = i + 1; isDbcs = true;
+                        out.write(0x20); start = i + 1; isDbcs = true;
                     }} else if (input[i] == 0x0F) {{
                         if (i > start) {{
                             byte[] chunk = Arrays.copyOfRange(input, start, i);
@@ -54,7 +59,7 @@ def try_fallback_tools(input_path, output_path, from_enc, to_enc, keep_sosi=Fals
                             wrapped[wrapped.length - 1] = 0x0F;
                             out.write(new String(wrapped, mixedEnc).getBytes("{java_to}"));
                         }}
-                        out.write(0x0F); start = i + 1; isDbcs = false;
+                        out.write(0x20); start = i + 1; isDbcs = false;
                     }}
                 }}
                 if (start < input.length) {{
@@ -136,7 +141,7 @@ def main():
     parser.add_argument("--out_excel", default="Result.xlsx", help="Đường dẫn file Excel xuất ra báo cáo (Mặc định: Result.xlsx).")
     parser.add_argument("--encoding", default="shift_jis", help="Bảng mã file text (Mặc định: shift_jis).")
     parser.add_argument("--from_enc", default=None, help="Bảng mã gốc của file Output (VD: cp20290). Nếu có, tool sẽ tự động convert trước khi xử lý.")
-    parser.add_argument("--keep_sosi", action="store_true", help="Giữ nguyên ký tự điều khiển Shift-Out (0x0E) và Shift-In (0x0F) để bảo toàn chiều dài byte.")
+    parser.add_argument("--keep_sosi", action="store_true", help="Bảo toàn chiều dài byte bằng cách thay thế ký tự SOSI (0x0E, 0x0F) bằng ký tự space (0x20).")
     
     args = parser.parse_args()
     
@@ -169,9 +174,11 @@ def main():
         
         if length is not None and str(length).strip().isdigit():
             length = int(length)
+            start_byte = layout_total_bytes
             layout_total_bytes += length
-            # Lưu lại vị trí cột (1-based) để dùng sau
-            layout.append({'name': str(name).strip(), 'length': length, 'col': i + 1})
+            end_byte = layout_total_bytes
+            # Lưu lại vị trí cột (1-based), start_byte và end_byte để dùng sau
+            layout.append({'name': str(name).strip(), 'length': length, 'col': i + 1, 'start_byte': start_byte, 'end_byte': end_byte})
 
     print(f" -> Tìm thấy {len(layout)} fields. Tổng số byte layout (dự kiến): {layout_total_bytes}")
     if layout_total_bytes == 0:
@@ -199,8 +206,7 @@ def main():
         output_bytes = f.read()
 
     if args.from_enc:
-        # Loại bỏ SOSI (0x0E, 0x0F) để preview không bị lỗi font khi decode Shift-JIS
-        preview_str = output_bytes[:500].replace(b'\x0E', b'').replace(b'\x0F', b'').decode(args.encoding, errors='replace')
+        preview_str = output_bytes[:500].decode(args.encoding, errors='replace')
         print(f" -> [PREVIEW NỘI DUNG SAU CONVERT (500 byte đầu)]:\n{preview_str}\n" + "-"*50)
 
     # Nhận diện xem file output có ký tự xuống dòng hay không
@@ -228,10 +234,8 @@ def main():
     for row_idx in range(start_data_row, sheet.max_row + 1):
         record_index = row_idx - start_data_row
         
-        row_total_bytes = 0
         field_data_list = []
         
-        # Tính chiều dài thực tế cho dòng hiện tại dựa trên giá trị Testcase
         for field in layout:
             col_idx = field['col']
             cell = sheet.cell(row=row_idx, column=col_idx)
@@ -248,15 +252,10 @@ def main():
                 
                 # Encode và tính độ dài byte thực tế
                 expected_bytes = expected_str.encode(args.encoding, errors='replace')
-                field_len = len(expected_bytes)
                 
-                field_data_list.append({'cell': cell, 'bytes': expected_bytes, 'str': expected_str, 'has_data': True, 'name': field['name'], 'layout_len': field['length']})
+                field_data_list.append({'cell': cell, 'bytes': expected_bytes, 'str': expected_str, 'has_data': True, 'name': field['name'], 'layout_len': field['length'], 'start_byte': field['start_byte'], 'end_byte': field['end_byte']})
             else:
-                # Nếu ô thực sự không có data (None), độ dài sẽ tính là 0 (Không lấy từ dòng 2 nữa)
-                field_len = 0
                 field_data_list.append({'cell': cell, 'has_data': False, 'name': field['name'], 'layout_len': field['length']})
-                
-            row_total_bytes += field_len
 
         # Trích xuất đoạn byte chunk tương ứng với dòng data này
         if use_lines:
@@ -272,20 +271,11 @@ def main():
             chunk_bytes = output_bytes[start_pos:end_pos]
             current_offset = end_pos # Cộng dồn cho record tiếp theo
             
-        # Loại bỏ ký tự SOSI (0x0E, 0x0F) ra khỏi chunk để việc decode và match chuỗi Shift-JIS không bị gãy đoạn
-        chunk_clean = chunk_bytes.replace(b'\x0E', b'').replace(b'\x0F', b'')
+        # Dữ liệu đã được convert sẵn (SOSI -> space), không cần clean nữa
+        chunk_clean = chunk_bytes
 
         print(current_offset)
-        print(f" - Đang kiểm tra dòng {row_idx} (Record {record_index + 1}) | Chiều dài tự tính: {row_total_bytes} bytes")
-        
-        # In ra cảnh báo chi tiết các field có độ dài nhập vào khác với layout
-        if row_total_bytes != layout_total_bytes and row_total_bytes > 0:
-            print(f"   -> [GỢI Ý] Chiều dài data bạn nhập ({row_total_bytes}) đang lệch so với Layout ({layout_total_bytes}). Nguyên nhân từ các ô Excel sau:")
-            for f_data in field_data_list:
-                if f_data['has_data']:
-                    actual_len = len(f_data['bytes'])
-                    # if actual_len != f_data['layout_len']:
-                    #     print(f"      + Field '{f_data['name']}': Layout = {f_data['layout_len']} byte | Thực tế nhập = {actual_len} byte -> '{f_data['str']}'")
+        print(f" - Đang kiểm tra dòng {row_idx} (Record {record_index + 1}) | Chiều dài (từ dòng 2): {layout_total_bytes} bytes")
 
         if not chunk_bytes:
             print(f"   -> Cảnh báo: File output không có đủ data cho record {record_index + 1}")
@@ -298,17 +288,23 @@ def main():
                 cell = f_data['cell']
                 expected_bytes = f_data['bytes']
                 expected_str = f_data['str']
+                start_byte = f_data['start_byte']
+                end_byte = f_data['end_byte']
 
-                if expected_bytes in chunk_clean:
+                # Trích xuất chính xác phạm vi byte của field này từ record
+                actual_field_bytes = chunk_clean[start_byte:end_byte]
+
+                # Kiểm tra giá trị mong muốn có nằm TRONG PHẠM VI của field này không
+                if expected_bytes in actual_field_bytes:
                     cell.fill = fill_match
                 else:
                     cell.fill = fill_diff
                     
                     # In ra log chuỗi thực tế trong file output (đã giải mã) để dễ debug
-                    chunk_str_for_debug = chunk_bytes.decode(args.encoding, errors='replace')
+                    chunk_str_for_debug = actual_field_bytes.decode(args.encoding, errors='replace')
                     # Chỉ in 100 ký tự để log không bị quá dài
                     snippet = chunk_str_for_debug[:100].replace('\r', '').replace('\n', '')
-                    # print(f"      [DIFF] Excel: '{expected_str}' | Thực tế file Output có: '{snippet}'...")
+                    # print(f"      [DIFF] Field '{f_data['name']}' ({start_byte}->{end_byte}) | Excel: '{expected_str}' | Output: '{snippet}'")
     
     print(f"4. Đang lưu kết quả ra: {args.out_excel}")
     wb.save(args.out_excel)
