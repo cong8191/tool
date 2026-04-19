@@ -340,8 +340,10 @@ def process_output_logic(in_val, cell_desc, field_meta):
     except:
         total_len = 8
         
-    if is_zenkaku:
-        char_limit = total_len // 2
+    is_0e0f = "0e/0f" in rule_desc_lower or ("fullwidth" in rule_desc_lower and ("0e" in rule_desc_lower or "0f" in rule_desc_lower))
+
+    if is_zenkaku or is_0e0f:
+        char_limit = max(0, (total_len - 2) // 2) if is_0e0f else total_len // 2
         pad_char = "０" # Dùng số 0 toàn góc nếu là kiểu Zenkaku
         x_char = "Ｘ"   # Ký tự X toàn góc dùng khi không map được code
         pad_char_text = "　" # Khoảng trắng toàn góc
@@ -359,16 +361,17 @@ def process_output_logic(in_val, cell_desc, field_meta):
             in_val_str = str(code_mapping[in_val_str])
         else:
             # Không tìm thấy trong mapping (VD: Data cố tình làm sai hoặc case EMPTY toàn space), điền toàn chữ X theo độ dài Output
-            return x_char * char_limit
+            out_val = x_char * char_limit
+            if is_0e0f:
+                out_val = " " + out_val + " "
+            return out_val
             
     # 0.2 Xử lý Format Date (YYYY/MM/DD)
     if "yyyy/mm/dd" in rule_desc_lower and len(in_val_str) == 8 and in_val_str.isdigit():
         in_val_str = f"{in_val_str[:4]}/{in_val_str[4:6]}/{in_val_str[6:]}"
     
     # 0. Xử lý Rule Convert Full-width trước khi tính độ dài
-    if "0e/0f" in rule_desc_lower or ("fullwidth" in rule_desc_lower and ("0e" in rule_desc_lower or "0f" in rule_desc_lower)):
-        in_val_str = " " + to_zenkaku(in_val_str) + " "
-    elif "chuyển đổi thành full width" in rule_desc_lower or "全角" in rule_desc_str or "fullwidth" in rule_desc_lower:
+    if is_0e0f or "chuyển đổi thành full width" in rule_desc_lower or "全角" in rule_desc_str or "fullwidth" in rule_desc_lower:
         in_val_str = to_zenkaku(in_val_str)
         
     # 0.3 Bước 1: Xử lý đặc thù - Cắt bỏ N ký tự đầu hoặc cuối bằng Regex
@@ -439,6 +442,9 @@ def process_output_logic(in_val, cell_desc, field_meta):
             # Rỗng hoàn toàn (như Pattern EMPTY) và không có Rule ép buộc -> Lấp đầy bằng khoảng trắng
             out_val = out_val.ljust(char_limit, pad_char_text)
             
+    if is_0e0f:
+        out_val = " " + out_val + " "
+        
     return out_val
 
 # ==========================================
