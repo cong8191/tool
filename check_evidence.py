@@ -81,8 +81,8 @@ def check_evidence(file_path):
                         cell_val = format_val(ws_plan.cell(row=row, column=col).value)
                         
                         # Lấy chính xác tên field ở dòng 3 (Input) và dòng 5 (Output)
-                        in_name = format_val(ws_plan.cell(row=3, column=col).value)
-                        out_name = format_val(ws_plan.cell(row=5, column=col).value)
+                        in_name = format_val(ws_plan.cell(row=3, column=col).value).replace('\n', '').strip()
+                        out_name = format_val(ws_plan.cell(row=5, column=col).value).replace('\n', '').strip()
                         
                         if not in_name and not out_name:
                             continue
@@ -118,7 +118,7 @@ def check_evidence(file_path):
         
         gray_fill = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
         
-        # --- BƯỚC 1 (LÀM LẠI): BÔI XÁM TOÀN BỘ VÙNG DATA ---
+        # --- BƯỚC 1: BÔI XÁM CÁC FIELD KHÔNG ĐƯỢC TEST ---
         for row in range(1, ws_evi.max_row + 1):
             for c in range(1, ws_evi.max_column + 1):
                 val_c = format_val(ws_evi.cell(row=row, column=c).value)
@@ -151,8 +151,8 @@ def check_evidence(file_path):
                             if not has_top_border:
                                 continue
                             
-                        # Cứ có Header (hoặc có border) là bôi xám toàn bộ data (cách 6 dòng)
                         offset = 6
+                        last_row_tcs = []
                         while True:
                             curr_row = row + offset
                             if curr_row > ws_evi.max_row: break
@@ -173,8 +173,38 @@ def check_evidence(file_path):
                                 if not sort_val and not has_border: 
                                     break
                             
-                            data_cell.fill = gray_fill
-                            cells_colored += 1
+                            # Tìm Testcase ID trên dòng data (cột B hoặc C)
+                            tc_val = format_val(ws_evi.cell(row=curr_row, column=2).value)
+                            if not tc_val:
+                                tc_val = format_val(ws_evi.cell(row=curr_row, column=3).value)
+                                
+                            row_tcs = re.findall(r'\d+-\d+-\d+', tc_val)
+                            if not row_tcs:
+                                row_tcs = last_row_tcs # Kế thừa từ dòng trên nếu ô bị merge
+                            else:
+                                last_row_tcs = row_tcs
+                                
+                            tested_fields = set()
+                            for t_id in row_tcs:
+                                if t_id in tc_dict:
+                                    tested_fields.update(tc_dict[t_id]['test_in'])
+                                    tested_fields.update(tc_dict[t_id]['test_out'])
+                                    
+                            is_tested = False
+                            if header_val:
+                                if header_val in tested_fields:
+                                    is_tested = True
+                                else:
+                                    for tf in tested_fields:
+                                        if tf in header_val or header_val in tf:
+                                            is_tested = True
+                                            break
+                            
+                            if is_tested:
+                                data_cell.fill = openpyxl.styles.PatternFill(fill_type=None)
+                            else:
+                                data_cell.fill = gray_fill
+                                cells_colored += 1
                             offset += 1
 
         print(f"3. Đang lưu lại các thay đổi...")
