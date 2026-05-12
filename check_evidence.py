@@ -55,6 +55,15 @@ def check_evidence(file_path):
         
         last_b = ""
         last_c = ""
+        last_d = ""
+        
+        all_in_fields = set()
+        all_out_fields = set()
+        for col in range(8, ws_plan.max_column + 1):
+            in_name = format_val(ws_plan.cell(row=3, column=col).value).replace('\n', '').strip()
+            out_name = format_val(ws_plan.cell(row=5, column=col).value).replace('\n', '').strip()
+            if in_name: all_in_fields.add(in_name)
+            if out_name: all_out_fields.add(out_name)
         
         # Theo cấu trúc chuẩn, testcase thường bắt đầu từ dòng 8 hoặc 10 trở đi
         # Cột H (index 8) trở đi chứa các field (input/output)
@@ -63,13 +72,20 @@ def check_evidence(file_path):
             val_c = format_val(ws_plan.cell(row=row, column=3).value)
             val_d = format_val(ws_plan.cell(row=row, column=4).value)
             
-            # Xử lý Merge cell: Giữ lại giá trị của ô phía trên nếu ô hiện tại bị rỗng do gộp ô
-            if val_b: last_b = val_b
-            if val_c: last_c = val_c
+            # Xử lý Merge cell: Giữ lại giá trị của các ô bị gộp, tự động làm sạch nếu qua cụm mới
+            if val_b:
+                last_b = val_b
+                if not val_c: last_c = ""
+                if not val_d: last_d = ""
+            if val_c:
+                last_c = val_c
+                if not val_d: last_d = ""
+            if val_d:
+                last_d = val_d
                 
-            # Nếu có giá trị cột D, ta ghép B-C-D thành ID testcase (VD: 1-1-1)
-            if last_b and last_c and val_d:
-                tc_id = f"{last_b}-{last_c}-{val_d}"
+            # Ghép B-C-D thành ID testcase (VD: 1-1-1)
+            if last_b and last_c and last_d:
+                tc_id = f"{last_b}-{last_c}-{last_d}"
                 
                 # Bỏ qua các dòng Header (nếu có chứa chữ 項目, No...)
                 if "項目" not in tc_id and "No" not in tc_id:
@@ -93,28 +109,35 @@ def check_evidence(file_path):
                             if in_name: test_in.add(in_name)
                             if out_name: test_out.add(out_name)
                     
-                    if has_data and tc_id not in testcases:
-                        testcases.append(tc_id)
-                        tc_dict[tc_id] = {'test_in': test_in, 'test_out': test_out}
+                    if has_data:
+                        if tc_id not in testcases:
+                            testcases.append(tc_id)
+                            tc_dict[tc_id] = {'test_in': test_in, 'test_out': test_out}
+                        else:
+                            tc_dict[tc_id]['test_in'].update(test_in)
+                            tc_dict[tc_id]['test_out'].update(test_out)
                         
         print(f" -> Tìm thấy {len(testcases)} testcases cần kiểm tra.")
-
-        print("\n--- DANH SÁCH FIELD ĐƯỢC TEST (○) TỪNG TESTCASE ---")
-        for tc in testcases:
-            t_in = tc_dict[tc]['test_in']
-            t_out = tc_dict[tc]['test_out']
-            print(f"[{tc}]")
-            if t_in:
-                print(f"  + Input : {', '.join(t_in)}")
-            if t_out:
-                print(f"  + Output: {', '.join(t_out)}")
-        print("---------------------------------------------------\n")
+        
+        # print("\n--- DANH SÁCH FIELD ĐƯỢC TEST (○) TỪNG TESTCASE ---")
+        # for tc in testcases:
+        #     t_in = tc_dict[tc]['test_in']
+        #     t_out = tc_dict[tc]['test_out']
+        #     print(f"[{tc}]")
+        #     if t_in:
+        #         print(f"  + Input : {', '.join(t_in)}")
+        #     if t_out:
+        #         print(f"  + Output: {', '.join(t_out)}")
+        # print("---------------------------------------------------\n")
 
         print(f"2. Đang đối chiếu và tô màu xám các field không test trong sheet '{sheet_evi_name}'...")
         missing_tcs = []
         found_tcs = []
         
         cells_colored = 0
+        
+        evi_in_tcs = set()
+        evi_out_tcs = set()
         
         gray_fill = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
         
@@ -125,6 +148,26 @@ def check_evidence(file_path):
                 
                 # Cứ thấy chữ "並び順" là xác định đây là một bảng Data
                 if '並び順' in val_c:
+                    # --- Xác định bảng này thuộc Input hay Output ---
+                    table_headers = []
+                    for hc in range(c + 1, ws_evi.max_column + 1):
+                        val_hc_check = format_val(ws_evi.cell(row=row, column=hc).value)
+                        if '並び順' in val_hc_check: break
+                        for r_idx in range(row + 1, row + 6):
+                            h_val = format_val(ws_evi.cell(row=r_idx, column=hc).value).replace('\n', '').strip()
+                            if h_val: table_headers.append(h_val)
+                            
+                    in_count = 0
+                    out_count = 0
+                    for h_val in table_headers:
+                        is_in = any(h_val == tf or tf in h_val or h_val in tf for tf in all_in_fields)
+                        is_out = any(h_val == tf or tf in h_val or h_val in tf for tf in all_out_fields)
+                        if is_in and not is_out: in_count += 1
+                        if is_out and not is_in: out_count += 1
+                        
+                    table_is_input = (in_count >= out_count)
+                    table_is_output = (out_count >= in_count)
+
                     # Quét các cột bên phải chữ 並び順
                     for hc in range(c + 1, ws_evi.max_column + 1):
                         val_hc_check = format_val(ws_evi.cell(row=row, column=hc).value)
@@ -132,13 +175,16 @@ def check_evidence(file_path):
                         if '並び順' in val_hc_check:
                             break 
                             
-                        # Kiểm tra xem cột này có Tên field (cách 5 dòng) không
-                        header_row = row + 5
-                        if header_row > ws_evi.max_row: break
-                        header_val = format_val(ws_evi.cell(row=header_row, column=hc).value).replace('\n', '').strip()
+                        # Quét toàn bộ các dòng header (từ row+1 đến row+5) để tìm Tên Field
+                        header_vals = []
+                        for r_idx in range(row + 1, row + 6):
+                            if r_idx > ws_evi.max_row: break
+                            h_val = format_val(ws_evi.cell(row=r_idx, column=hc).value).replace('\n', '').strip()
+                            if h_val:
+                                header_vals.append(h_val)
                         
-                        # Nếu không có Header, check xem vùng data bên dưới có border không (xử lý gộp ô ngang Merge Header)
-                        if not header_val:
+                        # Nếu không có bất kỳ Header nào, check xem vùng data bên dưới có border không
+                        if not header_vals:
                             check_data_cell = ws_evi.cell(row=row + 6, column=hc)
                             has_top_border = False
                             if check_data_cell.border:
@@ -184,6 +230,12 @@ def check_evidence(file_path):
                             else:
                                 last_row_tcs = row_tcs
                                 
+                            # Lưu Testcase ID vừa quét được vào danh sách Input/Output của Evidence
+                            if table_is_input:
+                                evi_in_tcs.update(row_tcs)
+                            if table_is_output:
+                                evi_out_tcs.update(row_tcs)
+                                
                             tested_fields = set()
                             for t_id in row_tcs:
                                 if t_id in tc_dict:
@@ -191,14 +243,16 @@ def check_evidence(file_path):
                                     tested_fields.update(tc_dict[t_id]['test_out'])
                                     
                             is_tested = False
-                            if header_val:
-                                if header_val in tested_fields:
+                            for h_val in header_vals:
+                                if h_val in tested_fields:
                                     is_tested = True
-                                else:
-                                    for tf in tested_fields:
-                                        if tf in header_val or header_val in tf:
-                                            is_tested = True
-                                            break
+                                    break
+                                for tf in tested_fields:
+                                    if tf in h_val or h_val in tf:
+                                        is_tested = True
+                                        break
+                                if is_tested:
+                                    break
                             
                             if is_tested:
                                 data_cell.fill = openpyxl.styles.PatternFill(fill_type=None)
@@ -206,6 +260,22 @@ def check_evidence(file_path):
                                 data_cell.fill = gray_fill
                                 cells_colored += 1
                             offset += 1
+
+        # --- Cảnh báo Testcase thiếu mapping hai chiều trong sheet Evidence ---
+        evi_warnings = []
+        all_evi_tcs = evi_in_tcs.union(evi_out_tcs)
+        for tc in sorted(list(all_evi_tcs)):
+            if tc not in tc_dict: continue # Bỏ qua các ID lạ không có trong Test Plan
+            
+            if tc in evi_in_tcs and tc not in evi_out_tcs:
+                evi_warnings.append(f"Testcase [{tc}] có trong Evidence Input nhưng thiếu Evidence Output.")
+            elif tc in evi_out_tcs and tc not in evi_in_tcs:
+                evi_warnings.append(f"Testcase [{tc}] có trong Evidence Output nhưng thiếu Evidence Input.")
+
+        if evi_warnings:
+            print("\n[CẢNH BÁO] Phát hiện Testcase thiếu mapping hai chiều (trong sheet Evidence):")
+            for w in evi_warnings:
+                print(f"  ! {w}")
 
         print(f"3. Đang lưu lại các thay đổi...")
         wb.save(file_path)
