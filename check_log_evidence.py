@@ -4,12 +4,22 @@ import argparse
 import os
 import datetime
 import re
+import json
 
+# Imports for image processing, needed by both manual Gemini and Tesseract
 try:
-    import pytesseract
     from PIL import Image
     import io
-    
+    HAS_IMAGE_LIBS = True
+except ImportError:
+    HAS_IMAGE_LIBS = False
+
+# Flag for manual mode
+MANUAL_GEMINI_WEB = True # Đổi thành True để dùng Gemini web miễn phí, False để dùng Tesseract OCR (local)
+
+# Tesseract specific import
+try:
+    import pytesseract
     # Cấu hình đường dẫn cài đặt Tesseract-OCR trên Windows
     pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
     HAS_OCR = True
@@ -71,6 +81,7 @@ def check_log_evidence(file_path):
 
     # Pre-load result sheets into memory for quick lookup
     result_sheets = {}
+    expected_runs_by_sheet = {}
     for rs_name in ["テスト計画書兼結果報告書(共通)", "テスト計画書兼結果報告書(個別)"]:
         if rs_name in wb.sheetnames:
             rs = wb[rs_name]
@@ -78,17 +89,46 @@ def check_log_evidence(file_path):
             
             # Kiểm tra lỗi Cột C có dữ liệu nhưng Cột K trống
             empty_k_rows = []
+            expected_runs = {}
+            last_b, last_c, last_d = "", "", ""
+            
             for row_idx, row in enumerate(rs.iter_rows(values_only=True), start=1):
+                val_b = str(row[1]).strip() if len(row) > 1 and row[1] is not None else ""
                 val_c = str(row[2]).strip() if len(row) > 2 and row[2] is not None else ""
+                val_d = str(row[3]).strip() if len(row) > 3 and row[3] is not None else ""
+                
+                if val_b:
+                    last_b = val_b
+                    if not val_c: last_c = ""
+                    if not val_d: last_d = ""
+                if val_c:
+                    last_c = val_c
+                    if not val_d: last_d = ""
+                if val_d:
+                    last_d = val_d
+                    
+                val_e = str(row[4]).strip() if len(row) > 4 and row[4] is not None else ""
+                val_f = str(row[5]).strip() if len(row) > 5 and row[5] is not None else ""
                 col_k_val = row[10] if len(row) > 10 else None
                 
-                # Bỏ qua dòng tiêu đề (thường chứa chữ '項目')
-                if val_c and "項目" not in val_c and (col_k_val is None or str(col_k_val).strip() == ""):
-                    empty_k_rows.append(row_idx)
-                    
+                if last_c and "項目" not in last_c and "No" not in last_c:
+                    if col_k_val is not None and str(col_k_val).strip() != "":
+                        m_run = re.search(r'\d+', str(col_k_val))
+                        if m_run:
+                            run_num = int(m_run.group())
+                            tc_parts = [p for p in [last_b, last_c, last_d] if p]
+                            tc_id = "-".join(tc_parts)
+                            expected_runs.setdefault(run_num, []).append(tc_id)
+                    else:
+                        # Tránh báo nhầm dòng bị merge hoặc dòng trống hoàn toàn
+                        # Chỉ báo nếu dòng thực sự có nội dung Test (Cột C, D, E hoặc F có chữ)
+                        if val_c:
+                            empty_k_rows.append(row_idx)
+                            
             if empty_k_rows:
                 print(f"================ KIỂM TRA: {rs_name} ================")
-                print(f"❌ LỖI: Cột C có dữ liệu nhưng Cột K (số lần test) bị trống tại các dòng: {', '.join(map(str, empty_k_rows))}\n")
+                print(f"⚠️ CẢNH BÁO: Dòng có nội dung Test nhưng Cột K (số lần test) bị trống tại: {', '.join(map(str, empty_k_rows))}\n")
+            expected_runs_by_sheet[rs_name] = expected_runs
 
     target_sheets = ['エビデンス(共通)', 'エビデンス(個別)']
     found_any_sheet = False
@@ -120,9 +160,11 @@ def check_log_evidence(file_path):
         in_table = False
         col_idx_gyo = -1
         col_idx_nichiji = -1
+        col_idx_level = -1
         col_idx_msg = -1
         
         group_data = []
+        found_runs_set = set()
 
         def flush_group():
             if group_data:
@@ -131,7 +173,8 @@ def check_log_evidence(file_path):
                 for r in range(group_start_row, log_start_row):
                     if r in images_by_row:
                         group_images.extend(images_by_row[r])
-                analyze_group(current_group, group_data, rs, result_sheet_name, group_images)
+                # Truyền thêm file_name để check Interface ID
+                analyze_group(current_group, group_data, rs, result_sheet_name, group_images, os.path.basename(file_path), found_runs_set)
                 group_data.clear()
 
         for row_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
@@ -151,7 +194,8 @@ def check_log_evidence(file_path):
                 if "行" in row_strs and "日時" in row_strs and "レベル" in row_strs:
                     col_idx_gyo = row_strs.index("行")
                     col_idx_nichiji = row_strs.index("日時")
-                    col_idx_msg = row_strs.index("メッセージ") if "メッセージ" in row_strs else -1
+                    col_idx_level = row_strs.index("レベル")
+                    col_idx_msg = row_strs.index("メッセージ") if "メッセージ" in row_strs else (col_idx_level + 1)
                     in_table = True
                     continue
                 else:
@@ -178,18 +222,10 @@ def check_log_evidence(file_path):
                     if found_gyo != -1 and found_nichiji != -1 and found_level != -1:
                         col_idx_gyo = found_gyo
                         col_idx_nichiji = found_nichiji
-                        
-                        # Tìm cột chứa Message (thường là cột xa nhất có chứa text phía sau cột Level)
-                        col_idx_msg = -1
-                        for c_idx in range(len(row) - 1, found_level, -1):
-                            if row[c_idx] is not None and str(row[c_idx]).strip() != "":
-                                col_idx_msg = c_idx
-                                break
-                        if col_idx_msg == -1:
-                            col_idx_msg = found_level + 1
+                        col_idx_level = found_level
+                        col_idx_msg = found_level + 1
                             
                         in_table = True
-                        # Không dùng `continue` để code đi tiếp xuống khối `if in_table` bên dưới và xử lý luôn dòng này
 
             # Đang đọc dữ liệu trong bảng Log
             if in_table:
@@ -210,7 +246,16 @@ def check_log_evidence(file_path):
 
                 try:
                     gyo_num = int(float(str(gyo_val).strip()))
-                    msg_val = row[col_idx_msg] if col_idx_msg != -1 and col_idx_msg < len(row) else ""
+                    
+                    # Gom toàn bộ text từ cột message trở về sau 
+                    # (Giải quyết triệt để vấn đề khoảng trắng tab / cột rỗng chèn giữa Level và Message)
+                    msg_parts = []
+                    start_col = col_idx_msg if col_idx_msg != -1 else (col_idx_level + 1 if col_idx_level != -1 else 3)
+                    for c_idx in range(start_col, len(row)):
+                        if row[c_idx] is not None and str(row[c_idx]).strip() != "":
+                            msg_parts.append(str(row[c_idx]).strip())
+                    
+                    msg_val = " ".join(msg_parts)
                     group_data.append({
                         'row_idx': row_idx,
                         'gyo': gyo_num,
@@ -225,10 +270,30 @@ def check_log_evidence(file_path):
         # Quét xong sheet, nếu còn data chưa phân tích thì phân tích nốt
         flush_group()
             
+        # Tổng kết Coverage
+        print(f"\n================ TỔNG KẾT COVERAGE CHO SHEET {sheet_name} ================")
+        expected_runs = expected_runs_by_sheet.get(result_sheet_name, {})
+        if not expected_runs:
+            print("  - ⚠️ Không có thông tin nhóm test (số lần chạy) nào được khai báo ở cột K trong Kế hoạch.")
+        else:
+            missing_runs = []
+            for run_num in sorted(expected_runs.keys()):
+                # Loại bỏ duplicate TCs để hiển thị đẹp hơn
+                tcs = list(dict.fromkeys(expected_runs[run_num]))
+                if run_num in found_runs_set:
+                    print(f"  - ✅ Nhóm {run_num} (gồm TC: {', '.join(tcs)}): Đã có Log Evidence.")
+                else:
+                    print(f"  - ❌ LỖI: Nhóm {run_num} (gồm TC: {', '.join(tcs)}): KHÔNG TÌM THẤY Log Evidence!")
+                    missing_runs.append(run_num)
+            
+            if not missing_runs:
+                print("  => TOÀN BỘ CÁC NHÓM TEST TRONG KẾ HOẠCH ĐỀU ĐÃ CÓ EVIDENCE!")
+        print("")
+
     if not found_any_sheet:
         print(f"Lỗi: Không tìm thấy sheet nào có tên 'エビデンス(共通)' hoặc 'エビデンス(個別)' trong file này.")
 
-def analyze_group(group_name, data, rs, rs_name, group_images=None):
+def analyze_group(group_name, data, rs, rs_name, group_images=None, file_name="", found_runs_set=None):
     if group_images is None:
         group_images = []
 
@@ -279,12 +344,109 @@ def analyze_group(group_name, data, rs, rs_name, group_images=None):
     if len(raw_dates) > 1:
         print(f"  - CẢNH BÁO DATE: ⚠️ Cụm này chứa log của nhiều ngày khác nhau ({', '.join(sorted_dates)}). Có vẻ cụm này đã được chạy check nhiều lần!")
 
+    panel_start_time = None
+    panel_duration_ms = None
+    jobnet_id = None
+    interface_id = None
+
     # Kiểm tra thời gian từ ảnh (OCR)
     if not group_images:
         print("  - [Ảnh Status Panel]: ❌ LỖI: Có log chạy nhưng không tìm thấy ảnh (Status Panel) nào ở trên bảng log!")
-    elif HAS_OCR:
+    elif MANUAL_GEMINI_WEB and HAS_IMAGE_LIBS:
+        prompt = """
+Please analyze the provided software dialog and log viewer images (Japanese UI) and extract the following 5 pieces of information.
+Return ONLY a valid JSON object matching this exact schema:
+
+1. "start_time": The time value (format HH:MM:SS) located next to "実行開始" or similar in the status bar at the bottom.
+2. "duration_ms": The integer number of milliseconds located before "ms" and next to "正常終了" or similar in the status bar.
+3. "jobnet_id": The string value for the parameter named "P_JobnetID", "P_JobnetId", or similar.
+4. "interface_id": The string value for the parameter named "P_InterfaceID", "P_InterfaceId", or similar.
+5. "end_time_log_img": The time value (format HH:MM:SS) in the "日時" column associated with the message "サブフローの実行が終了しました" (or similar ending message) from the log table image.
+
+Search the entire images carefully. If a parameter is present but its value is empty, return "". If it is absolutely missing or unreadable, use null.
+Example output:
+{"start_time": "16:11:08", "duration_ms": 350, "jobnet_id": "P1J0111@I0111", "interface_id": "RFSH0111", "end_time_log_img": "11:52:13"}
+"""
+        # Lọc các ảnh đủ lớn (tránh gửi nhầm icon bé xíu lên Gemini)
+        valid_images = []
+        for img in group_images:
+            try:
+                img_data = img._data() if callable(getattr(img, '_data', None)) else getattr(img, '_data', None)
+                if img_data:
+                    p_img = Image.open(io.BytesIO(img_data))
+                    if p_img.width >= 100 and p_img.height >= 50:
+                        if p_img.mode != 'RGB':
+                            p_img = p_img.convert('RGB')
+                        valid_images.append(p_img)
+            except Exception: pass
+
+        if not valid_images:
+            print("  - [Ảnh Status Panel]: ❌ LỖI: Không tìm thấy ảnh nào đủ lớn trong nhóm này.")
+        else:
+            # Ghép tất cả các ảnh thành 1 ảnh duy nhất (xếp dọc) để tải lên web tiện lợi hơn
+            widths, heights = zip(*(i.size for i in valid_images))
+            max_width = max(widths)
+            total_height = sum(heights)
+
+            merged_img = Image.new('RGB', (max_width, total_height), (255, 255, 255))
+            y_offset = 0
+            for img in valid_images:
+                merged_img.paste(img, (0, y_offset))
+                y_offset += img.size[1]
+                
+            # --- CHẾ ĐỘ THỦ CÔNG DÙNG GEMINI WEB ---
+            manual_dir = os.path.join(os.path.dirname(os.path.abspath(file_path)), "gemini_manual_upload")
+            os.makedirs(manual_dir, exist_ok=True)
+            
+            prompt_path = os.path.join(manual_dir, "prompt.txt")
+            with open(prompt_path, "w", encoding="utf-8") as f:
+                f.write(prompt)
+                
+            # Xóa các file ảnh cũ để tránh nhầm lẫn với các lượt quét trước
+            for fname in os.listdir(manual_dir):
+                if fname.endswith(".png"):
+                    try: os.remove(os.path.join(manual_dir, fname))
+                    except: pass
+                
+            safe_group = re.sub(r'[^a-zA-Z0-9_\-]', '_', group_name)
+            img_path = os.path.join(manual_dir, f"{safe_group}_merged.png")
+            merged_img.save(img_path)
+                
+            print(f"  - [Ảnh Status Panel]: ⚠️ CHẾ ĐỘ THỦ CÔNG ĐANG BẬT!")
+            print(f"      -> Đã ghép {len(valid_images)} ảnh thành 1 ảnh duy nhất và xuất ra thư mục: {manual_dir}")
+            print(f"      -> VUI LÒNG kéo thả 1 ảnh duy nhất và copy nội dung prompt.txt lên: https://gemini.google.com")
+            print(f"      -> Sau đó, copy khối JSON kết quả trả về, dán vào đây và nhấn Enter 2 lần:")
+            
+            user_lines = []
+            while True:
+                line = input()
+                if line.strip() == "":
+                    if user_lines: break
+                else:
+                    user_lines.append(line)
+            
+            json_text = "\n".join(user_lines).strip()
+
+            try:
+                if json_text.startswith("```json"): json_text = json_text[7:]
+                elif json_text.startswith("```"): json_text = json_text[3:]
+                if json_text.endswith("```"): json_text = json_text[:-3]
+                
+                ocr_result = json.loads(json_text.strip())
+                
+                panel_start_time = ocr_result.get("start_time")
+                panel_duration_ms = ocr_result.get("duration_ms")
+                jobnet_id = ocr_result.get("jobnet_id")
+                interface_id = ocr_result.get("interface_id")
+                end_time_log_img = ocr_result.get("end_time_log_img")
+            except Exception as e:
+                print(f"      ⚠️ Lỗi khi phân tích kết quả JSON: {e}")
+
+    elif HAS_OCR and HAS_IMAGE_LIBS:
+        print("  - [Ảnh Status Panel]: ⚠️ Không tìm thấy Gemini API Key. Đang thử dùng Tesseract OCR (độ chính xác thấp hơn)...")
         panel_start_time = None
         panel_duration_ms = None
+        end_time_log_img = None
         for idx, img in enumerate(group_images):
             try:
                 image_data = img._data() if callable(getattr(img, '_data', None)) else getattr(img, '_data', None)
@@ -295,96 +457,208 @@ def analyze_group(group_name, data, rs, rs_name, group_images=None):
                     pil_img = pil_img.convert('L')
                     width, height = pil_img.size
                     
-                    # Phóng to toàn bộ ảnh lên 2 lần để nét chữ rõ hơn
-                    full_img = pil_img.resize((width * 2, height * 2), Image.Resampling.LANCZOS if hasattr(Image, 'Resampling') else Image.ANTIALIAS)
+                    # CHIẾN THUẬT MỚI: Cắt riêng phần thanh Status (thường nằm sát đáy, cao khoảng 80px)
+                    bottom_crop = pil_img.crop((0, max(0, height - 80), width, height))
                     
-                    # Cách 1: Đọc TOÀN BỘ ảnh với PSM 11 (Sparse text - chuyên tìm chữ rải rác trên màn hình UI)
-                    text = pytesseract.image_to_string(full_img, lang='jpn+eng', config='--psm 11')
+                    # Phóng to ảnh bằng 2 phương pháp (LANCZOS làm mượt, NEAREST giữ nét vuông vức chống nhìn nhầm 5 thành 6)
+                    resample_filter = Image.Resampling.LANCZOS if hasattr(Image, 'Resampling') else Image.ANTIALIAS
+                    resample_nearest = Image.Resampling.NEAREST if hasattr(Image, 'Resampling') else Image.NEAREST
                     
-                    # Regex thông minh: Tìm Thời gian và tuỳ chọn lấy thêm số ms phía sau (Dùng re.DOTALL để quét qua dấu xuống dòng)
-                    time_regex = r'(\d{1,2})\s*[:：]\s*(\d{2})\s*[:：]\s*(\d{2})(?:.*?(\d+)\s*ms)?'
-                    m = re.search(time_regex, text, re.IGNORECASE | re.DOTALL)
+                    full_img = pil_img.resize((width * 2, height * 2), resample_filter)
+                    bottom_img_lanczos = bottom_crop.resize((width * 2, bottom_crop.size[1] * 2), resample_filter)
+                    bottom_img_nearest = bottom_crop.resize((width * 2, bottom_crop.size[1] * 2), resample_nearest)
                     
-                    if not m:
-                        # Cách 2: Đọc TOÀN BỘ ảnh với PSM 3 (Chế độ tự phân tích layout mặc định của Tesseract)
-                        text_fallback = pytesseract.image_to_string(full_img, lang='jpn+eng', config='--psm 3')
-                        m2 = re.search(time_regex, text_fallback, re.IGNORECASE | re.DOTALL)
-                        if m2:
-                            text = text_fallback
-                            m = m2
+                    time_regex = r'([01]?\d|2[0-3])\s*[:：]\s*([0-5]\d)\s*[:：]\s*([0-5]\d)(?:.*?(\d+)\s*ms)?'
+                    
+                    m = None
+                    
+                    # 1. ĐỌC THỜI GIAN TỪ THANH STATUS
+                    # Bỏ hoàn toàn tiếng Nhật, chỉ dùng tiếng Anh (eng) để đọc số chính xác nhất
+                    ocr_strategies = [
+                        (bottom_img_nearest, 'eng', '--psm 7'),     # Ưu tiên 1: Cắt đáy, ảnh nét vuông (tránh nhầm 5 thành 6)
+                        (bottom_img_lanczos, 'eng', '--psm 7'),     # Ưu tiên 2: Cắt đáy, ảnh mượt
+                        (bottom_img_nearest, 'eng', '--psm 6'),
+                        (bottom_img_lanczos, 'eng', '--psm 6'),
+                        (full_img, 'eng', '--psm 11'),      # Dự phòng: Đọc rải rác toàn ảnh
+                        (full_img, 'eng', '--psm 3'),       # Dự phòng: Đọc layout toàn ảnh
+                    ]
+                    
+                    for img_variant, lang, psm in ocr_strategies:
+                        text_variant = pytesseract.image_to_string(img_variant, lang=lang, config=psm)
+                        m_variant = re.search(time_regex, text_variant, re.IGNORECASE | re.DOTALL)
+                        if m_variant:
+                            m = m_variant
+                            break
                             
-                    if not m:
-                        # Cách 3: Ép TOÀN BỘ ảnh thành Trắng/Đen (Binarization) để khử nhiễu nền
-                        threshold = 150
-                        bw_img = full_img.point(lambda p: p > threshold and 255)
-                        text_bw = pytesseract.image_to_string(bw_img, lang='jpn+eng', config='--psm 11')
-                        m3 = re.search(time_regex, text_bw, re.IGNORECASE | re.DOTALL)
-                        if m3:
-                            text = text_bw
-                            m = m3
+                    # 2. ĐỌC THÔNG SỐ JOBNET / INTERFACE ID TỪ BẢNG
+                    # Dùng tiếng Anh và PSM 3 để đọc Layout, bỏ qua tiếng Nhật
+                    full_text = pytesseract.image_to_string(full_img, lang='eng', config='--psm 3')
 
                     if m:
-                        print(m.group(4))
                         # Định dạng lại thành chuẩn HH:MM:SS
                         panel_start_time = f"{int(m.group(1)):02d}:{m.group(2)}:{m.group(3)}"
                         panel_duration_ms = m.group(4)
+                        
+                        # Trích xuất Jobnet ID và Interface ID thông minh bằng mảng từ vựng (Words)
+                        # Giúp vượt qua các lỗi khoảng trắng / ký tự rác của OCR
+                        words = re.findall(r'[A-Za-z0-9@_\-]+', full_text)
+                        skip_words = {'string', 'type', 'name', 'id', 'interface', 'jobnet', 'value'}
+                        
+                        jobnet_id = None
+                        interface_id = None
+                        
+                        for i, w in enumerate(words):
+                            w_lower = w.lower()
+                            if 'jobnet' in w_lower and not jobnet_id:
+                                for next_w in words[i+1:]:
+                                    nl = next_w.lower()
+                                    if nl not in skip_words and len(next_w) > 3 and 'str' not in nl:
+                                        jobnet_id = next_w
+                                        break
+                                        
+                            if 'interface' in w_lower and not interface_id:
+                                for next_w in words[i+1:]:
+                                    nl = next_w.lower()
+                                    if nl not in skip_words and len(next_w) > 3 and 'str' not in nl:
+                                        interface_id = next_w
+                                        break
+
+                        if jobnet_id is not None:
+                            print(f"  - [Ảnh Status Panel]: Tìm thấy Jobnet ID: '{jobnet_id}'")
+                        else:
+                            print(f"  - [Ảnh Status Panel]: ⚠️ Không tìm thấy Jobnet ID trong ảnh.")
+                            
+                        if interface_id is not None:
+                            print(f"  - [Ảnh Status Panel]: Tìm thấy Interface ID: '{interface_id}'")
+                            if interface_id != "":
+                                if file_name and interface_id.lower() in file_name.lower():
+                                    print(f"      ✅ OK: Interface ID '{interface_id}' có tồn tại trong tên file Excel.")
+                                else:
+                                    print(f"      ❌ LỖI: Interface ID '{interface_id}' KHÔNG tồn tại trong tên file Excel ({file_name}).")
+                            else:
+                                print(f"      ⚠️ Interface ID là chuỗi rỗng nên bỏ qua kiểm tra với tên file.")
+                        else:
+                            print(f"  - [Ảnh Status Panel]: ⚠️ Không tìm thấy Interface ID trong ảnh.")
+
                         break
             except Exception as e:
                 print(f"      ⚠️ Lỗi khi xử lý ảnh (OCR): {e}")
-        
-        if not panel_start_time:
-            print("  - [Ảnh Status Panel]: ⚠️ Không tìm thấy hoặc không đọc được thời gian '実行開始:' từ ảnh.")
-        
-        if panel_start_time:
-            print(f"  - [Ảnh Status Panel]: Tìm thấy giờ bắt đầu là {panel_start_time}")
-            first_log_val = data[0]['nichiji']
-            if first_log_val:
-                first_log_time_str = ""
-                if isinstance(first_log_val, datetime.datetime):
-                    first_log_time_str = first_log_val.strftime("%H:%M:%S")
-                else:
-                    time_m = re.search(r'(\d{1,2}:\d{2}:\d{2})', str(first_log_val))
-                    if time_m:
-                        first_log_time_str = time_m.group(1)
-                
-                if first_log_time_str:
-                    try:
-                        fmt = "%H:%M:%S"
-                        t_panel = datetime.datetime.strptime(panel_start_time, fmt).time()
-                        t_log = datetime.datetime.strptime(first_log_time_str, fmt).time()
-                        
-                        if t_log >= t_panel:
-                            print(f"      ✅ OK: Thời gian log ({first_log_time_str}) >= Thời gian ảnh ({panel_start_time})")
-                        else:
-                            print(f"      ❌ LỖI: Thời gian log ({first_log_time_str}) < Thời gian ảnh ({panel_start_time})")
-                    except ValueError:
-                        print(f"      ⚠️ Không thể so sánh thời gian: Log ({first_log_time_str}), Ảnh ({panel_start_time})")
 
-        if panel_duration_ms and data:
-            print(data)
-            log_duration_ms = None
-            # Quét ngược từ dưới lên để tìm chính xác dòng log kết thúc subflow chứa duration
-            for item in reversed(data):
-                msg = str(item.get('message', ''))
-                if "サブフローの実行が終了しました" in msg:
-                    m_log_dur = re.search(r'\[\s*(\d+)(?:\s*ms)?\s*\]', msg, re.IGNORECASE)
-                    if m_log_dur:
-                        log_duration_ms = m_log_dur.group(1)
-                        break
-
-            if log_duration_ms:
-                try:
-                    if int(log_duration_ms) < int(panel_duration_ms):
-                        print(f"      ✅ OK: Duration Log Main ({log_duration_ms}ms) < Duration Ảnh ({panel_duration_ms}ms)")
-                    else:
-                        print(f"      ❌ LỖI: Duration Log Main ({log_duration_ms}ms) >= Duration Ảnh ({panel_duration_ms}ms)")
-                except ValueError:
-                    pass
+    else:
+        print("  - [Ảnh Status Panel]: ⚠️ Cần cài đặt thư viện OCR (pytesseract, Pillow) để đọc text từ ảnh.")
+        
+    if panel_start_time:
+        print(f"  - [Ảnh Status Panel]: Tìm thấy giờ bắt đầu là {panel_start_time}")
+        first_log_val = data[0]['nichiji']
+        if first_log_val:
+            first_log_time_str = ""
+            if isinstance(first_log_val, datetime.datetime):
+                first_log_time_str = first_log_val.strftime("%H:%M:%S")
             else:
-                print(f"      ⚠️ Không tìm thấy dòng log 'サブフローの実行が終了しました' chứa thời gian '[Nms]' hoặc '[N]' để so sánh Duration.")
+                time_m = re.search(r'(\d{1,2}:\d{2}:\d{2})', str(first_log_val))
+                if time_m:
+                    first_log_time_str = time_m.group(1)
+            
+            if first_log_time_str:
+                try:
+                    fmt = "%H:%M:%S"
+                    t_panel = datetime.datetime.strptime(panel_start_time, fmt).time()
+                    t_log = datetime.datetime.strptime(first_log_time_str, fmt).time()
+                    
+                    # Tính độ trễ giây (Dung sai)
+                    t_panel_dt = datetime.datetime.combine(datetime.date.today(), t_panel)
+                    t_log_dt = datetime.datetime.combine(datetime.date.today(), t_log)
+                    diff_seconds = (t_panel_dt - t_log_dt).total_seconds()
+                    
+                    if t_log >= t_panel:
+                        print(f"      ✅ OK: Thời gian log ({first_log_time_str}) >= Thời gian ảnh ({panel_start_time})")
+                    elif diff_seconds <= 2:
+                        print(f"      ✅ OK (Chấp nhận dung sai {int(diff_seconds)}s): Thời gian log ({first_log_time_str}) ~ Thời gian ảnh ({panel_start_time})")
+                    else:
+                        print(f"      ❌ LỖI: Thời gian log ({first_log_time_str}) < Thời gian ảnh ({panel_start_time}) (Chênh lệch {int(diff_seconds)}s)")
+                except ValueError:
+                    print(f"      ⚠️ Không thể so sánh thời gian: Log ({first_log_time_str}), Ảnh ({panel_start_time})")
+    else:
+        print("  - [Ảnh Status Panel]: ⚠️ Không tìm thấy hoặc không đọc được thời gian '実行開始:' từ ảnh.")
 
-    elif not HAS_OCR:
-        print("  - [Ảnh Status Panel]: ⚠️ Cần cài đặt thư viện 'pytesseract' và 'Pillow' để đọc text từ ảnh.")
+    log_duration_ms = None
+    log_end_time_str = None
+    if data:
+        # Quét ngược từ dưới lên để tìm chính xác dòng log kết thúc subflow
+        for item in reversed(data):
+            msg = str(item.get('message', ''))
+            if "サブフローの実行が終了しました" in msg:
+                m_log_dur = re.search(r'\[\s*(\d+)(?:\s*ms)?\s*\]', msg, re.IGNORECASE)
+                if m_log_dur:
+                    log_duration_ms = m_log_dur.group(1)
+                
+                val = item['nichiji']
+                if val:
+                    if isinstance(val, datetime.datetime):
+                        log_end_time_str = val.strftime("%H:%M:%S")
+                    else:
+                        time_m = re.search(r'(\d{1,2}:\d{2}:\d{2})', str(val))
+                        if time_m:
+                            log_end_time_str = time_m.group(1)
+                    break
+
+    if panel_duration_ms and data:
+        if log_duration_ms:
+            try:
+                if int(log_duration_ms) < int(panel_duration_ms):
+                    print(f"      ✅ OK: Duration Log Main ({log_duration_ms}ms) < Duration Ảnh ({panel_duration_ms}ms)")
+                else:
+                    print(f"      ❌ LỖI: Duration Log Main ({log_duration_ms}ms) >= Duration Ảnh ({panel_duration_ms}ms)")
+            except ValueError:
+                pass
+        else:
+            print(f"      ⚠️ Không tìm thấy dòng log 'サブフローの実行が終了しました' chứa thời gian '[Nms]' hoặc '[N]' để so sánh Duration.")
+
+    if end_time_log_img:
+        print(f"  - [Ảnh Log Viewer]: Tìm thấy giờ kết thúc (サブフローの実行が終了しました) là {end_time_log_img}")
+        if log_end_time_str:
+            try:
+                fmt = "%H:%M:%S"
+                t_img = datetime.datetime.strptime(end_time_log_img, fmt).time()
+                t_txt = datetime.datetime.strptime(log_end_time_str, fmt).time()
+                
+                if t_img == t_txt:
+                    print(f"      ✅ OK: Thời gian kết thúc trong ảnh ({end_time_log_img}) KHỚP với log text ({log_end_time_str}).")
+                else:
+                    print(f"      ❌ LỖI: Thời gian kết thúc trong ảnh ({end_time_log_img}) LỆCH với log text ({log_end_time_str}).")
+            except ValueError:
+                print(f"      ⚠️ Không thể so sánh thời gian kết thúc: Ảnh ({end_time_log_img}), Log ({log_end_time_str})")
+        else:
+            print(f"      ⚠️ Không tìm thấy thời gian kết thúc trong log text để đối chiếu.")
+
+    if jobnet_id is not None and data:
+        jobnet_in_log = False
+        log_jobnet_found_val = None
+        
+        # Chỉ lấy phần trước '@' của Jobnet ID trong ảnh để so sánh
+        jobnet_id_compare = jobnet_id.split('@')[0] if jobnet_id else ""
+        
+        for item in data:
+            msg = str(item.get('message', ''))
+            if "ジョブネットID：" in msg:
+                m_log_jobnet = re.search(r'ジョブネットID：([^\s　]*)', msg)
+                if m_log_jobnet:
+                    log_jobnet_found_val = m_log_jobnet.group(1)
+                    log_jobnet_compare = log_jobnet_found_val.split('@')[0] if log_jobnet_found_val else ""
+                    if log_jobnet_compare == jobnet_id_compare:
+                        jobnet_in_log = True
+                        break
+            elif jobnet_id_compare and jobnet_id_compare in msg:
+                jobnet_in_log = True
+                break
+                
+        if jobnet_in_log:
+            print(f"      ✅ OK: Jobnet ID '{jobnet_id}' khớp với dữ liệu trong Log.")
+        else:
+            if log_jobnet_found_val is not None:
+                print(f"      ❌ LỖI: Jobnet ID trong ảnh là '{jobnet_id}', nhưng trong Log là '{log_jobnet_found_val}'.")
+            else:
+                print(f"      ❌ LỖI: Không tìm thấy dòng log chứa 'ジョブネットID：' hoặc Jobnet ID '{jobnet_id}' trong Log.")
 
     # Bóc tách số lần chạy từ tên nhóm (Ví dụ: ■1回目 -> 1)
     m_run = re.search(r'(\d+)回目', group_name)
@@ -516,12 +790,37 @@ def analyze_group(group_name, data, rs, rs_name, group_images=None):
         else:
             print(f"  - [Đối chiếu]: ⚠️ Không tìm thấy testcase '{group_name}' trong sheet {rs_name}")
 
+    if target_run_num is not None and found_runs_set is not None:
+        found_runs_set.add(target_run_num)
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Tool kiểm tra Evidence Log (Sort tăng dần, check thời gian) cho file hoặc folder.")
     parser.add_argument("path", help="Đường dẫn file excel hoặc thư mục chứa các file excel.")
     args = parser.parse_args()
     
     input_path = args.path
+
+    if not os.path.exists(input_path):
+        print(f"Lỗi: Đường dẫn không tồn tại: {input_path}")
+    elif os.path.isfile(input_path):
+        # Nếu là một file đơn lẻ, xử lý trực tiếp
+        check_log_evidence(input_path)
+    elif os.path.isdir(input_path):
+        # Nếu là một thư mục, quét đệ quy để tìm file .xlsx
+        print(f"--- Đang quét thư mục '{input_path}' để tìm file .xlsx ---")
+        excel_files = []
+        for root, dirs, files in os.walk(input_path):
+            for file in files:
+                if file.endswith('.xlsx') and not file.startswith('~$'):
+                    excel_files.append(os.path.join(root, file))
+        
+        if not excel_files:
+            print("Không tìm thấy file .xlsx nào trong thư mục được chỉ định.")
+        else:
+            print(f"Tìm thấy {len(excel_files)} file. Bắt đầu xử lý...\n")
+            for i, file_path in enumerate(excel_files):
+                print(f"\n{'='*25} [{i+1}/{len(excel_files)}] ĐANG XỬ LÝ FILE: {os.path.basename(file_path)} {'='*25}")
+                check_log_evidence(file_path)
 
     if not os.path.exists(input_path):
         print(f"Lỗi: Đường dẫn không tồn tại: {input_path}")
