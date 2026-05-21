@@ -5,10 +5,11 @@ import os
 import datetime
 import re
 import json
+import shutil
 
 # Imports for image processing, needed by both manual Gemini and Tesseract
 try:
-    from PIL import Image
+    from PIL import Image, ImageDraw
     import io
     HAS_IMAGE_LIBS = True
 except ImportError:
@@ -87,41 +88,48 @@ def check_log_evidence(file_path):
             rs = wb[rs_name]
             result_sheets[rs_name] = rs
             
-            # Kiểm tra lỗi Cột C có dữ liệu nhưng Cột K trống
+            # Kiểm tra lỗi Cột B/C có dữ liệu nhưng Cột K trống
             empty_k_rows = []
             expected_runs = {}
-            last_b, last_c, last_d = "", "", ""
+            last_a, last_b, last_c = "", "", ""
             
+            def is_int_like(s):
+                return s and re.match(r'^\d+(\.0)?$', s) is not None
+
             for row_idx, row in enumerate(rs.iter_rows(values_only=True), start=1):
+                val_a = str(row[0]).strip() if len(row) > 0 and row[0] is not None else ""
                 val_b = str(row[1]).strip() if len(row) > 1 and row[1] is not None else ""
                 val_c = str(row[2]).strip() if len(row) > 2 and row[2] is not None else ""
-                val_d = str(row[3]).strip() if len(row) > 3 and row[3] is not None else ""
                 
+                if val_a:
+                    last_a = val_a
+                    if not val_b: last_b = ""
+                    if not val_c: last_c = ""
                 if val_b:
                     last_b = val_b
                     if not val_c: last_c = ""
-                    if not val_d: last_d = ""
                 if val_c:
                     last_c = val_c
-                    if not val_d: last_d = ""
-                if val_d:
-                    last_d = val_d
                     
+                val_d = str(row[3]).strip() if len(row) > 3 and row[3] is not None else ""
                 val_e = str(row[4]).strip() if len(row) > 4 and row[4] is not None else ""
-                val_f = str(row[5]).strip() if len(row) > 5 and row[5] is not None else ""
                 col_k_val = row[10] if len(row) > 10 else None
                 
-                if last_c and "項目" not in last_c and "No" not in last_c:
+                if last_b and "項目" not in last_b and "No" not in last_b:
                     if col_k_val is not None and str(col_k_val).strip() != "":
                         m_run = re.search(r'\d+', str(col_k_val))
                         if m_run:
                             run_num = int(m_run.group())
-                            tc_parts = [p for p in [last_b, last_c, last_d] if p]
-                            tc_id = "-".join(tc_parts)
-                            expected_runs.setdefault(run_num, []).append(tc_id)
+                            # Chỉ tạo testcase ID nếu cả 3 cột A, B, C đều có giá trị và là số
+                            if is_int_like(last_a) and is_int_like(last_b) and is_int_like(last_c):
+                                clean_a = last_a.split('.')[0]
+                                clean_b = last_b.split('.')[0]
+                                clean_c = last_c.split('.')[0]
+                                tc_id = f"{clean_a}-{clean_b}-{clean_c}"
+                                expected_runs.setdefault(run_num, []).append(tc_id)
                     else:
                         # Tránh báo nhầm dòng bị merge hoặc dòng trống hoàn toàn
-                        # Chỉ báo nếu dòng thực sự có nội dung Test (Cột C, D, E hoặc F có chữ)
+                        # Chỉ báo nếu dòng thực sự có nội dung Test (Cột B hoặc C có chữ)
                         if val_c:
                             empty_k_rows.append(row_idx)
                             
@@ -130,8 +138,11 @@ def check_log_evidence(file_path):
                 print(f"⚠️ CẢNH BÁO: Dòng có nội dung Test nhưng Cột K (số lần test) bị trống tại: {', '.join(map(str, empty_k_rows))}\n")
             expected_runs_by_sheet[rs_name] = expected_runs
 
+    sheet_coverage_info = {}
+
     target_sheets = ['エビデンス(共通)', 'エビデンス(個別)']
     found_any_sheet = False
+    global_all_groups = []
 
     for sheet_name in target_sheets:
         if sheet_name not in wb.sheetnames:
@@ -141,6 +152,7 @@ def check_log_evidence(file_path):
         ws = wb[sheet_name]
         print(f"================ SHEET: {sheet_name} ================")
         
+        all_groups_to_analyze = []
         result_sheet_name = get_result_sheet_name(sheet_name)
         rs = result_sheets.get(result_sheet_name)
 
@@ -149,7 +161,21 @@ def check_log_evidence(file_path):
             try:
                 if hasattr(img.anchor, '_from'):
                     r = img.anchor._from.row + 1
-                    images_by_row.setdefault(r, []).append(img)
+                    
+                    # Trích xuất dữ liệu byte ngay lập tức để tránh lỗi I/O file bị đóng về sau
+                    img_data = None
+                    try:
+                        img_data = img._data() if callable(getattr(img, '_data', None)) else getattr(img, '_data', None)
+                    except Exception:
+                        try:
+                            if hasattr(img, 'ref') and hasattr(img.ref, 'read'):
+                                img.ref.seek(0)
+                                img_data = img.ref.read()
+                        except Exception:
+                            pass
+                            
+                    if img_data:
+                        images_by_row.setdefault(r, []).append(img_data)
             except Exception:
                 pass
                 
@@ -165,28 +191,63 @@ def check_log_evidence(file_path):
         
         group_data = []
         found_runs_set = set()
+        group_count = 0
 
-        def flush_group():
+        def flush_group(end_row=None):
             if group_data:
                 group_images = []
-                log_start_row = group_data[0]['row_idx']
-                for r in range(group_start_row, log_start_row):
+                limit = end_row if end_row else (ws.max_row + 1)
+                for r in range(group_start_row, limit):
                     if r in images_by_row:
                         group_images.extend(images_by_row[r])
-                # Truyền thêm file_name để check Interface ID
-                analyze_group(current_group, group_data, rs, result_sheet_name, group_images, os.path.basename(file_path), found_runs_set)
+                        del images_by_row[r]
+            
+                all_groups_to_analyze.append({
+                    'group_name': current_group,
+                    'data': list(group_data),
+                    'rs': rs,
+                    'rs_name': result_sheet_name,
+                    'images': group_images,
+                    'file_name': os.path.basename(file_path),
+                    'found_runs_set': found_runs_set,
+                    'expected_runs': expected_runs_by_sheet.get(result_sheet_name, {})
+                })
                 group_data.clear()
+            else:
+                # Nếu group không có data log, kiểm tra xem có phải là nhóm Flow Config không
+                # Được xác định nếu nằm ở sheet (共通) và tên nhóm chứa chữ 'フロー' hoặc là nhóm đầu tiên
+                if sheet_name == 'エビデンス(共通)' and current_group != "Unknown_Group" and ('フロー' in current_group or group_count == 1):
+                    group_images = []
+                    limit = end_row if end_row else (ws.max_row + 1)
+                    for r in range(group_start_row, limit):
+                        if r in images_by_row:
+                            group_images.extend(images_by_row[r])
+                            del images_by_row[r]
+                    if group_images:
+                        all_groups_to_analyze.append({
+                            'group_name': 'Flow_Config',
+                            'data': [],
+                            'rs': rs,
+                            'rs_name': result_sheet_name,
+                            'images': group_images,
+                            'file_name': os.path.basename(file_path),
+                            'found_runs_set': found_runs_set,
+                            'expected_runs': expected_runs_by_sheet.get(result_sheet_name, {})
+                        })
 
         for row_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
             col_a_val = row[0]
             
             # Nhận diện nhóm chạy mới (Có giá trị ở cột A)
             if col_a_val is not None and str(col_a_val).strip() != "":
-                if in_table and group_data:
-                    flush_group()
+                if current_group != "Unknown_Group":
+                    flush_group(end_row=row_idx)
                     in_table = False
+                    
+                group_count += 1
                 current_group = str(col_a_val).strip()
                 group_start_row = row_idx
+                in_table = False
 
             # Đang tìm kiếm Header của bảng Log
             if not in_table:
@@ -231,7 +292,6 @@ def check_log_evidence(file_path):
             if in_table:
                 # Nếu độ dài của dòng không đủ để lấy cột đã lưu, nghĩa là kết thúc bảng
                 if len(row) <= max(col_idx_gyo, col_idx_nichiji):
-                    flush_group()
                     in_table = False
                     continue
 
@@ -240,7 +300,6 @@ def check_log_evidence(file_path):
 
                 # Điều kiện kết thúc bảng: Cột "行" bị trống hoặc không phải là số
                 if gyo_val is None or str(gyo_val).strip() == "":
-                    flush_group()
                     in_table = False
                     continue
 
@@ -264,21 +323,225 @@ def check_log_evidence(file_path):
                     })
                 except ValueError:
                     # Không convert được sang số -> Hết bảng
-                    flush_group()
                     in_table = False
 
         # Quét xong sheet, nếu còn data chưa phân tích thì phân tích nốt
-        flush_group()
+        flush_group(end_row=ws.max_row + 1)
             
-        # Tổng kết Coverage
+        sheet_coverage_info[sheet_name] = {
+            'expected_runs': expected_runs_by_sheet.get(result_sheet_name, {}),
+            'found_runs_set': found_runs_set
+        }
+
+        for g in all_groups_to_analyze:
+            g['sheet_name'] = sheet_name
+            short_sheet = "共通" if "共通" in sheet_name else "個別"
+            g['unique_name'] = f"{short_sheet}_{g['group_name']}"
+            global_all_groups.append(g)
+
+    gemini_result = {}
+    if MANUAL_GEMINI_WEB and global_all_groups:
+        export_dir = os.path.join(os.path.dirname(file_path), f"Gemini_Upload_{os.path.splitext(os.path.basename(file_path))[0]}")
+        os.makedirs(export_dir, exist_ok=True)
+        
+        group_image_mapping = {}
+        all_pages_for_pdf = []
+        global_page_idx = 1
+        group_page_ranges = {}
+        
+        for g in global_all_groups:
+            u_name = g['unique_name']
+            imgs = g['images']
+            if not imgs: continue
+            
+            safe_u_name = re.sub(r'[\\/*?:"<>|]', "_", u_name)
+            
+            start_page = global_page_idx
+            if HAS_IMAGE_LIBS and len(imgs) > 0:
+                for img_data in imgs:
+                    if img_data:
+                        try:
+                            im = Image.open(io.BytesIO(img_data)).convert('RGB')
+                            
+                            num_img = Image.new('RGB', (20, 20), color=(255, 255, 0))
+                            draw = ImageDraw.Draw(num_img)
+                            draw.text((6, 4), str(global_page_idx), fill=(255, 0, 0))
+                            
+                            nearest_filter = Image.Resampling.NEAREST if hasattr(Image, 'Resampling') else Image.NEAREST
+                            num_img = num_img.resize((80, 80), nearest_filter)
+                            draw_big = ImageDraw.Draw(num_img)
+                            draw_big.rectangle([(0, 0), (79, 79)], outline=(255, 0, 0), width=4)
+                            im.paste(num_img, (im.width - 80, 0))
+                            
+                            all_pages_for_pdf.append(im)
+                            global_page_idx += 1
+                        except Exception:
+                            pass
+                group_image_mapping[u_name] = safe_u_name
+            else:
+                image_data = imgs[0]
+                if image_data:
+                    img_path = os.path.join(export_dir, f"{safe_u_name}.png")
+                    with open(img_path, "wb") as f:
+                        f.write(image_data)
+                    group_image_mapping[u_name] = safe_u_name
+            
+            end_page = global_page_idx - 1
+            if end_page >= start_page:
+                group_page_ranges[u_name] = (start_page, end_page)
+        
+        if all_pages_for_pdf:
+            combined_pdf_path = os.path.join(export_dir, f"All_Evidence.pdf")
+            all_pages_for_pdf[0].save(combined_pdf_path, "PDF", resolution=100.0, save_all=True, append_images=all_pages_for_pdf[1:])
+
+        if group_image_mapping:
+            print(f"\n[GEMINI MANUAL MODE] Đã xuất 1 file PDF gộp duy nhất cho toàn bộ file vào thư mục:\n{export_dir}")
+            
+            mapping_text = "\n".join([f"- Nhóm '{k}': Từ trang {v[0]} đến trang {v[1]}" for k, v in group_page_ranges.items()])
+            
+            prompt = (
+                "Tôi có 1 file PDF chứa nhiều trang ảnh chụp màn hình. Trên góc phải trên cùng của mỗi trang có ĐÁNH SỐ THỨ TỰ (1, 2, 3...) trong một ô màu vàng.\n"
+                "Dưới đây là danh sách phân bổ các trang cho từng nhóm Test:\n"
+                f"{mapping_text}\n\n"
+                "Hãy đọc các thông tin sau từ file PDF dựa trên KHOẢNG TRANG TƯƠNG ỨNG CỦA TỪNG NHÓM và trả về ĐÚNG 1 ĐOẠN JSON duy nhất (không có markdown ```json):\n"
+                "* LƯU Ý TỐI QUAN TRỌNG: BẠN PHẢI COPY CHÍNH XÁC TÊN NHÓM TRONG DANH SÁCH TRÊN ĐỂ LÀM KEY TRONG JSON. KHÔNG ĐƯỢC TỰ Ý ĐỔI TÊN HAY SỬA SỐ (VD: Tuyệt đối không tự đổi 1回目 thành 8回目).\n"
+                "1. Đối với nhóm có chữ 'Flow_Config': Tìm giá trị của biến 'P_JobnetID' (hoặc 'I_JobnetID') và 'P_InterfaceID' (hoặc 'I_InterfaceID') từ bảng 'フロー変数' (cột '初期値') HOẶC bảng '引数' (cột '値'). Điền vào 'jobnet_id' và 'interface_id'.\n"
+                "2. Đối với các nhóm test còn lại (ví dụ '共通_■1回目', '個別_■1回目'...):\n"
+                "   - BƯỚC 1: Tìm '実行開始' (start_time) và '正常終了' (duration_ms) từ bảng Status Panel (Hộp thoại フローの実行).\n"
+                "     * CẢNH BÁO QUAN TRỌNG 1: TUYỆT ĐỐI KHÔNG lấy giờ từ đồng hồ hệ thống (Taskbar ở góc phải dưới cùng màn hình). Chỉ tìm chuỗi có dạng '実行開始: HH:MM:SS'.\n"
+                "   - BƯỚC 2: Tìm 'jobnet_id' và 'interface_id' từ MỘT TRONG HAI bảng sau:\n"
+                "     + Bảng 1: Bảng 'フロー変数' (Flow Variables). Tìm cột '初期値' (Initial value) tương ứng với biến 'P_JobnetID' (hoặc 'I_JobnetID') và 'P_InterfaceID' (hoặc 'I_InterfaceID').\n"
+                "     + Bảng 2: Bảng '引数' (Arguments) trong hộp thoại 'フローの実行'. Tìm cột '値' (Value) tương ứng với biến 'P_JobnetID' (hoặc 'I_JobnetID') và 'P_InterfaceID' (hoặc 'I_InterfaceID').\n"
+                "     * CẢNH BÁO QUAN TRỌNG 2 (CHỐNG ĐỌC NHẦM LOG): TUYỆT ĐỐI KHÔNG lấy thông tin từ các dòng log dạng text có chứa chữ 'ジョブネットID: ...' hay 'インターフェースID: ...'. CHỈ ĐƯỢC PHÉP lấy từ 2 bảng đã nêu. Nếu trong các trang của nhóm test KHÔNG có bảng nào chứa thông tin này, BẮT BUỘC để rỗng \"\".\n"
+                "   - BƯỚC 3: TÌM FILE OUTPUT: Tìm ảnh chụp File Explorer. Chú ý SỐ THỨ TỰ ở góc ảnh, ảnh File Explorer hợp lệ phải có số thứ tự LỚN HƠN (nằm sau) ảnh Status Panel. Lấy tên file và 'Date modified' (đổi sang định dạng YYYY/MM/DD HH:MM 24h) điền vào 'file_name' và 'file_modified_time'.\n"
+                "     * CHÚ Ý 1: Đọc đường dẫn (path) thư mục trên thanh địa chỉ. NẾU đường dẫn chứa chữ 'receive', ĐÓ CHẮC CHẮN LÀ FILE INPUT -> TUYỆT ĐỐI BỎ QUA và để rỗng 'file_name'.\n"
+                "     * CHÚ Ý 2 (QUAN TRỌNG): Chỉ ghi nhận file nếu 'Date modified' của file đó BẰNG HOẶC SAU thời gian '実行開始' (start_time) của ca test hiện tại. \n"
+                "     * CHÚ Ý 3: Nếu đường dẫn KHÔNG chứa 'receive' và thời gian file hợp lệ, hãy CHỌN file có 'Date modified' MỚI NHẤT (thời gian muộn hơn).\n"
+                "     * CHÚ Ý 4: Nếu 'Date modified' của file NHỎ HƠN (diễn ra trước) thời gian '実行開始' (start_time), hoặc ca test kết thúc lỗi (戻り値 khác 0) và không sinh ra file mới, hãy hiểu đó là file cũ còn sót lại -> TUYỆT ĐỐI BỎ QUA, để rỗng \"\" cho 'file_name' và 'file_modified_time'.\n"
+                "     * CHÚ Ý 5 (TỐI QUAN TRỌNG): Đọc CHÍNH XÁC nội dung hiển thị trên ảnh (nhớ chuyển đổi PM sang 24h). KHÔNG ĐƯỢC copy 'start_time' điền vào 'file_modified_time'. KHÔNG ĐƯỢC tự ý đoán mò, bịa đặt hoặc tự đồng bộ dữ liệu. Nếu không nhìn thấy rõ chữ trên ảnh, BẮT BUỘC ĐỂ RỖNG (\"\").\n"
+                "     * CHÚ Ý 6 (CHỐNG ẢO GIÁC): TUYỆT ĐỐI KHÔNG copy 'start_time', 'duration_ms', 'jobnet_id', 'interface_id', 'file_name', 'file_modified_time' hay BẤT KỲ thông tin nào từ nhóm test trước điền vào nhóm test sau. Nếu trong các trang của nhóm test hiện tại KHÔNG CÓ thông tin, BẮT BUỘC để rỗng (\"\").\n"
+                "Nếu không tìm thấy thông tin nào, hãy để rỗng (\"\").\n\n"
+                "Cấu trúc JSON mong muốn:\n"
+                "{\n"
+                "  \"共通_Flow_Config\": {\n"
+                "    \"jobnet_id\": \"...\",\n"
+                "    \"interface_id\": \"...\"\n"
+                "  },\n"
+                "  \"<COPY Y HỆT TÊN NHÓM TRONG DANH SÁCH LÊN ĐÂY>\": {\n"
+                "    \"start_time\": \"HH:MM:SS\",\n"
+                "    \"duration_ms\": \"123\",\n"
+                "    \"jobnet_id\": \"...\",\n"
+                "    \"interface_id\": \"...\",\n"
+                "    \"file_name\": \"...\",\n"
+                "    \"file_modified_time\": \"YYYY/MM/DD HH:MM\"\n"
+                "  }\n"
+                "}"
+            )
+            
+            prompt_path = os.path.join(export_dir, "prompt.txt")
+            with open(prompt_path, "w", encoding="utf-8") as f:
+                f.write(prompt)
+                
+            print(f"📄 Đã tạo file chứa Prompt cho bạn tại:\n{prompt_path}\n")
+            print("Vui lòng upload TẤT CẢ các ảnh này lên Gemini Web và sử dụng Prompt sau:\n")
+            print("-" * 50)
+            print(prompt)
+            print("-" * 50)
+            print("Dán kết quả JSON từ Gemini vào đây (nhấn Enter 2 lần liên tiếp để kết thúc):")
+            
+            json_lines = []
+            empty_streak = 0
+            while True:
+                try:
+                    line = input()
+                    if line.strip() == '':
+                        empty_streak += 1
+                        if empty_streak >= 2:
+                            break
+                    else:
+                        empty_streak = 0
+                    json_lines.append(line)
+                except EOFError:
+                    break
+                    
+            json_str = "\n".join(json_lines).strip()
+            if json_str.startswith("```json"): json_str = json_str[7:]
+            if json_str.startswith("```"): json_str = json_str[3:]
+            if json_str.endswith("```"): json_str = json_str[:-3]
+            
+            try:
+                if json_str:
+                    gemini_result = json.loads(json_str)
+                    print("✅ Đã parse JSON thành công!")
+            except Exception as e:
+                print(f"❌ LỖI parse JSON: {e}")
+                print("Sẽ fallback về Tesseract OCR...")
+
+    last_sheet = None
+    for g in global_all_groups:
+        sheet_name = g['sheet_name']
+        if sheet_name != last_sheet:
+            print(f"\n================ ĐANG PHÂN TÍCH KẾT QUẢ SHEET: {sheet_name} ================")
+            last_sheet = sheet_name
+            
+        if MANUAL_GEMINI_WEB:
+            safe_u_name = re.sub(r'[\\/*?:"<>|]', "_", g['unique_name'])
+            pre_ocr = None
+            if gemini_result:
+                if safe_u_name in gemini_result:
+                    pre_ocr = gemini_result[safe_u_name]
+                else:
+                    # Fallback tìm kiếm linh hoạt (Fuzzy match) vì AI thường đọc nhầm chữ hoặc tự đổi số thứ tự
+                    sheet_prefix = "共通" if "共通" in g['unique_name'] else "個別"
+                    
+                    def get_desc(t):
+                        # Bỏ tiền tố sheet
+                        t = re.sub(r'^(共通_|個別_)', '', t)
+                        # Xóa cụm số thứ tự và loại test ở đầu (VD: ■1回目 正常系・ -> xóa)
+                        desc = re.sub(r'^■?\d+回[目系]?\s*(正常系|異常系)?\s*[・.]?\s*', '', t)
+                        if not desc: 
+                            desc = t # Nếu xóa xong mất hết chữ (VD test chỉ tên là "■1回目") thì lấy lại nguyên bản
+                        # Đồng bộ khoảng trắng, dấu ngoặc, mũi tên
+                        return desc.replace(' ', '').replace('　', '').replace('(', '（').replace(')', '）').replace('->', '→').replace('−＞', '→').lower()
+                        
+                    g_desc = get_desc(g['group_name'])
+                    
+                    # Ưu tiên 1: Khớp chính xác description
+                    for k, v in gemini_result.items():
+                        if sheet_prefix in k and get_desc(k) == g_desc:
+                            pre_ocr = v
+                            break
+                            
+                    # Ưu tiên 2: Khớp một phần (nếu AI cắt bớt chữ dài)
+                    if not pre_ocr:
+                        for k, v in gemini_result.items():
+                            if sheet_prefix in k:
+                                k_desc = get_desc(k)
+                                if (g_desc in k_desc) or (k_desc in g_desc):
+                                    pre_ocr = v
+                                    break
+            analyze_group(
+                g['group_name'], g['data'], g['rs'], g['rs_name'], 
+                g['images'], g['file_name'], g['found_runs_set'], pre_ocr_result=pre_ocr,
+                expected_runs=g.get('expected_runs', {})
+            )
+        else:
+            analyze_group(
+                g['group_name'], g['data'], g['rs'], g['rs_name'], 
+                g['images'], g['file_name'], g['found_runs_set'],
+                expected_runs=g.get('expected_runs', {})
+            )
+
+    for sheet_name, info in sheet_coverage_info.items():
         print(f"\n================ TỔNG KẾT COVERAGE CHO SHEET {sheet_name} ================")
-        expected_runs = expected_runs_by_sheet.get(result_sheet_name, {})
+        expected_runs = info['expected_runs']
+        found_runs_set = info['found_runs_set']
+        
         if not expected_runs:
             print("  - ⚠️ Không có thông tin nhóm test (số lần chạy) nào được khai báo ở cột K trong Kế hoạch.")
         else:
             missing_runs = []
             for run_num in sorted(expected_runs.keys()):
-                # Loại bỏ duplicate TCs để hiển thị đẹp hơn
                 tcs = list(dict.fromkeys(expected_runs[run_num]))
                 if run_num in found_runs_set:
                     print(f"  - ✅ Nhóm {run_num} (gồm TC: {', '.join(tcs)}): Đã có Log Evidence.")
@@ -290,12 +553,47 @@ def check_log_evidence(file_path):
                 print("  => TOÀN BỘ CÁC NHÓM TEST TRONG KẾ HOẠCH ĐỀU ĐÃ CÓ EVIDENCE!")
         print("")
 
-    if not found_any_sheet:
-        print(f"Lỗi: Không tìm thấy sheet nào có tên 'エビデンス(共通)' hoặc 'エビデンス(個別)' trong file này.")
+    if MANUAL_GEMINI_WEB and global_all_groups:
+        input(f"\n✅ Đã check xong file '{os.path.basename(file_path)}'. Nhấn Enter để tiếp tục sang file tiếp theo...")
 
-def analyze_group(group_name, data, rs, rs_name, group_images=None, file_name="", found_runs_set=None):
+def analyze_group(group_name, data, rs, rs_name, group_images=None, file_name="", found_runs_set=None, pre_ocr_result=None, expected_runs=None):
+    if expected_runs is None:
+        expected_runs = {}
     if group_images is None:
         group_images = []
+
+    if group_name == 'Flow_Config':
+        print(f"\n[Kiểm tra Cấu hình Flow - Trước khi Test]:")
+        if pre_ocr_result:
+            jobnet_id = pre_ocr_result.get("jobnet_id")
+            interface_id = pre_ocr_result.get("interface_id")
+
+            # Trích xuất phần số từ tên file để so sánh (VD: SHRF0116 -> 0116)
+            m_if = re.search(r'_([A-Za-z0-9]+)\.xlsx$', file_name)
+            if_code = m_if.group(1) if m_if else ""
+            m_digits = re.search(r'(\d+)$', if_code)
+            digits = m_digits.group(1) if m_digits else ""
+
+            if jobnet_id:
+                print(f"  - [Ảnh Flow]: ✅ Tìm thấy P_JobnetID: '{jobnet_id}'")
+                if digits and digits in jobnet_id:
+                    print(f"      ✅ OK: P_JobnetID '{jobnet_id}' có chứa mã '{digits}' của file.")
+                else:
+                    print(f"      ❌ LỖI: P_JobnetID '{jobnet_id}' KHÔNG chứa mã '{digits}' của file.")
+            else:
+                print(f"  - [Ảnh Flow]: ❌ LỖI: Không tìm thấy P_JobnetID trong ảnh flow.")
+
+            if interface_id:
+                print(f"  - [Ảnh Flow]: ✅ Tìm thấy P_InterfaceID: '{interface_id}'")
+                if digits and digits in interface_id:
+                    print(f"      ✅ OK: P_InterfaceID '{interface_id}' có chứa mã '{digits}' của file.")
+                else:
+                    print(f"      ❌ LỖI: P_InterfaceID '{interface_id}' KHÔNG chứa mã '{digits}' của file.")
+            else:
+                print(f"  - [Ảnh Flow]: ❌ LỖI: Không tìm thấy P_InterfaceID trong ảnh flow.")
+        else:
+            print("  - [Ảnh Flow]: ⚠️ Không có kết quả JSON từ Gemini để đối chiếu.")
+        return
 
     if not data:
         return
@@ -348,108 +646,45 @@ def analyze_group(group_name, data, rs, rs_name, group_images=None, file_name=""
     panel_duration_ms = None
     jobnet_id = None
     interface_id = None
+    end_time_log_img = None
 
     # Kiểm tra thời gian từ ảnh (OCR)
     if not group_images:
         print("  - [Ảnh Status Panel]: ❌ LỖI: Có log chạy nhưng không tìm thấy ảnh (Status Panel) nào ở trên bảng log!")
-    elif MANUAL_GEMINI_WEB and HAS_IMAGE_LIBS:
-        prompt = """
-Please analyze the provided software dialog and log viewer images (Japanese UI) and extract the following 5 pieces of information.
-Return ONLY a valid JSON object matching this exact schema:
+    elif pre_ocr_result is not None:
+        panel_start_time = pre_ocr_result.get("start_time")
+        panel_duration_ms = pre_ocr_result.get("duration_ms")
+        jobnet_id = pre_ocr_result.get("jobnet_id")
+        interface_id = pre_ocr_result.get("interface_id")
+        end_time_log_img = pre_ocr_result.get("end_time_log_img")
 
-1. "start_time": The time value (format HH:MM:SS) located next to "実行開始" or similar in the status bar at the bottom.
-2. "duration_ms": The integer number of milliseconds located before "ms" and next to "正常終了" or similar in the status bar.
-3. "jobnet_id": The string value for the parameter named "P_JobnetID", "P_JobnetId", or similar.
-4. "interface_id": The string value for the parameter named "P_InterfaceID", "P_InterfaceId", or similar.
-5. "end_time_log_img": The time value (format HH:MM:SS) in the "日時" column associated with the message "サブフローの実行が終了しました" (or similar ending message) from the log table image.
-
-Search the entire images carefully. If a parameter is present but its value is empty, return "". If it is absolutely missing or unreadable, use null.
-Example output:
-{"start_time": "16:11:08", "duration_ms": 350, "jobnet_id": "P1J0111@I0111", "interface_id": "RFSH0111", "end_time_log_img": "11:52:13"}
-"""
-        # Lọc các ảnh đủ lớn (tránh gửi nhầm icon bé xíu lên Gemini)
-        valid_images = []
-        for img in group_images:
-            try:
-                img_data = img._data() if callable(getattr(img, '_data', None)) else getattr(img, '_data', None)
-                if img_data:
-                    p_img = Image.open(io.BytesIO(img_data))
-                    if p_img.width >= 100 and p_img.height >= 50:
-                        if p_img.mode != 'RGB':
-                            p_img = p_img.convert('RGB')
-                        valid_images.append(p_img)
-            except Exception: pass
-
-        if not valid_images:
-            print("  - [Ảnh Status Panel]: ❌ LỖI: Không tìm thấy ảnh nào đủ lớn trong nhóm này.")
+        if jobnet_id is not None:
+            print(f"  - [Ảnh Status Panel]: Tìm thấy Jobnet ID: '{jobnet_id}'")
         else:
-            # Ghép tất cả các ảnh thành 1 ảnh duy nhất (xếp dọc) để tải lên web tiện lợi hơn
-            widths, heights = zip(*(i.size for i in valid_images))
-            max_width = max(widths)
-            total_height = sum(heights)
-
-            merged_img = Image.new('RGB', (max_width, total_height), (255, 255, 255))
-            y_offset = 0
-            for img in valid_images:
-                merged_img.paste(img, (0, y_offset))
-                y_offset += img.size[1]
-                
-            # --- CHẾ ĐỘ THỦ CÔNG DÙNG GEMINI WEB ---
-            manual_dir = os.path.join(os.path.dirname(os.path.abspath(file_path)), "gemini_manual_upload")
-            os.makedirs(manual_dir, exist_ok=True)
+            print(f"  - [Ảnh Status Panel]: ⚠️ Không tìm thấy Jobnet ID trong ảnh.")
             
-            prompt_path = os.path.join(manual_dir, "prompt.txt")
-            with open(prompt_path, "w", encoding="utf-8") as f:
-                f.write(prompt)
-                
-            # Xóa các file ảnh cũ để tránh nhầm lẫn với các lượt quét trước
-            for fname in os.listdir(manual_dir):
-                if fname.endswith(".png"):
-                    try: os.remove(os.path.join(manual_dir, fname))
-                    except: pass
-                
-            safe_group = re.sub(r'[^a-zA-Z0-9_\-]', '_', group_name)
-            img_path = os.path.join(manual_dir, f"{safe_group}_merged.png")
-            merged_img.save(img_path)
-                
-            print(f"  - [Ảnh Status Panel]: ⚠️ CHẾ ĐỘ THỦ CÔNG ĐANG BẬT!")
-            print(f"      -> Đã ghép {len(valid_images)} ảnh thành 1 ảnh duy nhất và xuất ra thư mục: {manual_dir}")
-            print(f"      -> VUI LÒNG kéo thả 1 ảnh duy nhất và copy nội dung prompt.txt lên: https://gemini.google.com")
-            print(f"      -> Sau đó, copy khối JSON kết quả trả về, dán vào đây và nhấn Enter 2 lần:")
-            
-            user_lines = []
-            while True:
-                line = input()
-                if line.strip() == "":
-                    if user_lines: break
+        if interface_id is not None:
+            print(f"  - [Ảnh Status Panel]: Tìm thấy Interface ID: '{interface_id}'")
+            if interface_id != "":
+                if file_name and interface_id.lower() in file_name.lower():
+                    print(f"      ✅ OK: Interface ID '{interface_id}' có tồn tại trong tên file Excel.")
                 else:
-                    user_lines.append(line)
-            
-            json_text = "\n".join(user_lines).strip()
-
-            try:
-                if json_text.startswith("```json"): json_text = json_text[7:]
-                elif json_text.startswith("```"): json_text = json_text[3:]
-                if json_text.endswith("```"): json_text = json_text[:-3]
-                
-                ocr_result = json.loads(json_text.strip())
-                
-                panel_start_time = ocr_result.get("start_time")
-                panel_duration_ms = ocr_result.get("duration_ms")
-                jobnet_id = ocr_result.get("jobnet_id")
-                interface_id = ocr_result.get("interface_id")
-                end_time_log_img = ocr_result.get("end_time_log_img")
-            except Exception as e:
-                print(f"      ⚠️ Lỗi khi phân tích kết quả JSON: {e}")
+                    print(f"      ❌ LỖI: Interface ID '{interface_id}' KHÔNG tồn tại trong tên file Excel ({file_name}).")
+            else:
+                print(f"      ⚠️ Interface ID là chuỗi rỗng nên bỏ qua kiểm tra với tên file.")
+        else:
+            print(f"  - [Ảnh Status Panel]: ⚠️ Không tìm thấy Interface ID trong ảnh.")
 
     elif HAS_OCR and HAS_IMAGE_LIBS:
-        print("  - [Ảnh Status Panel]: ⚠️ Không tìm thấy Gemini API Key. Đang thử dùng Tesseract OCR (độ chính xác thấp hơn)...")
+        if MANUAL_GEMINI_WEB:
+            print("  - [Ảnh Status Panel]: ⚠️ Không có kết quả JSON từ Gemini. Đang dùng Tesseract OCR làm fallback (độ chính xác thấp hơn)...")
+        else:
+            print("  - [Ảnh Status Panel]: ⚠️ Đang dùng Tesseract OCR (độ chính xác thấp hơn)...")
         panel_start_time = None
         panel_duration_ms = None
         end_time_log_img = None
-        for idx, img in enumerate(group_images):
+        for idx, image_data in enumerate(group_images):
             try:
-                image_data = img._data() if callable(getattr(img, '_data', None)) else getattr(img, '_data', None)
                 if image_data:
                     pil_img = Image.open(io.BytesIO(image_data))
                     
@@ -584,6 +819,15 @@ Example output:
     log_duration_ms = None
     log_end_time_str = None
     if data:
+        last_val = data[-1]['nichiji']
+        if last_val:
+            if isinstance(last_val, datetime.datetime):
+                log_end_time_str = last_val.strftime("%H:%M:%S")
+            else:
+                time_m = re.search(r'(\d{1,2}:\d{2}:\d{2})', str(last_val))
+                if time_m:
+                    log_end_time_str = time_m.group(1)
+
         # Quét ngược từ dưới lên để tìm chính xác dòng log kết thúc subflow
         for item in reversed(data):
             msg = str(item.get('message', ''))
@@ -660,6 +904,24 @@ Example output:
             else:
                 print(f"      ❌ LỖI: Không tìm thấy dòng log chứa 'ジョブネットID：' hoặc Jobnet ID '{jobnet_id}' trong Log.")
 
+    file_name_ocr = pre_ocr_result.get("file_name") if pre_ocr_result else None
+    file_modified_time = pre_ocr_result.get("file_modified_time") if pre_ocr_result else None
+
+    if file_name_ocr and file_modified_time:
+        print(f"  - [Ảnh File Explorer]: Tìm thấy file '{file_name_ocr}' có Date modified là '{file_modified_time}'")
+        if log_end_time_str and sorted_dates:
+            try:
+                log_date_str = sorted_dates[-1]
+                log_datetime_str = f"{log_date_str} {log_end_time_str[:5]}"
+                
+                file_modified_hm = file_modified_time[:16]
+                if log_datetime_str == file_modified_hm:
+                    print(f"      ✅ OK: Thời gian xuất file '{file_name_ocr}' ({file_modified_time}) KHỚP với log ({log_datetime_str}).")
+                else:
+                    print(f"      ❌ LỖI: Thời gian xuất file '{file_name_ocr}' ({file_modified_time}) LỆCH với log ({log_datetime_str}).")
+            except Exception as e:
+                print(f"      ⚠️ Không thể so sánh thời gian xuất file: {e}")
+
     # Bóc tách số lần chạy từ tên nhóm (Ví dụ: ■1回目 -> 1)
     m_run = re.search(r'(\d+)回目', group_name)
     extracted_run = None
@@ -667,6 +929,31 @@ Example output:
     if m_run:
         extracted_run = int(m_run.group(1))
         base_group_name = re.sub(r'^■?\s*\d+回目\s*', '', group_name).strip()
+
+    # 5. Check testcase coverage in log
+    if extracted_run and expected_runs:
+        expected_tcs_for_run = set(expected_runs.get(extracted_run, []))
+        if expected_tcs_for_run:
+            found_tcs_in_log = set()
+            for item in data:
+                msg = str(item.get('message', ''))
+                # Find all occurrences of 'd-d-d' pattern
+                found_tcs_in_log.update(re.findall(r'\b\d+-\d+-\d+\b', msg))
+
+            print(f"  - [Đối chiếu Testcase trong Log]:")
+            missing_tcs = expected_tcs_for_run - found_tcs_in_log
+            extra_tcs = found_tcs_in_log - expected_tcs_for_run
+
+            if not missing_tcs and not extra_tcs:
+                print(f"      ✅ OK: Toàn bộ {len(expected_tcs_for_run)} testcase dự kiến ({', '.join(sorted(list(expected_tcs_for_run)))}) đều có trong log.")
+            else:
+                if missing_tcs:
+                    None
+                    # print(f"      ❌ LỖI: Thiếu {len(missing_tcs)} testcase trong log: {', '.join(sorted(list(missing_tcs)))}")
+                if extra_tcs:
+                    print(f"      ⚠️ CẢNH BÁO: Phát hiện testcase không có trong kế hoạch cho nhóm này: {', '.join(sorted(list(extra_tcs)))}")
+        else:
+            print(f"  - [Đối chiếu Testcase trong Log]: ⚠️ Không tìm thấy testcase nào được định nghĩa cho nhóm {extracted_run} trong Kế hoạch.")
 
     # 4. Check result sheet
     if rs:
@@ -796,6 +1083,7 @@ Example output:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Tool kiểm tra Evidence Log (Sort tăng dần, check thời gian) cho file hoặc folder.")
     parser.add_argument("path", help="Đường dẫn file excel hoặc thư mục chứa các file excel.")
+    parser.add_argument("--start", type=int, default=1, help="Vị trí file bắt đầu xử lý (1-based, mặc định: 1)")
     args = parser.parse_args()
     
     input_path = args.path
@@ -817,29 +1105,19 @@ if __name__ == "__main__":
         if not excel_files:
             print("Không tìm thấy file .xlsx nào trong thư mục được chỉ định.")
         else:
-            print(f"Tìm thấy {len(excel_files)} file. Bắt đầu xử lý...\n")
-            for i, file_path in enumerate(excel_files):
-                print(f"\n{'='*25} [{i+1}/{len(excel_files)}] ĐANG XỬ LÝ FILE: {os.path.basename(file_path)} {'='*25}")
-                check_log_evidence(file_path)
-
-    if not os.path.exists(input_path):
-        print(f"Lỗi: Đường dẫn không tồn tại: {input_path}")
-    elif os.path.isfile(input_path):
-        # Nếu là một file đơn lẻ, xử lý trực tiếp
-        check_log_evidence(input_path)
-    elif os.path.isdir(input_path):
-        # Nếu là một thư mục, quét đệ quy để tìm file .xlsx
-        print(f"--- Đang quét thư mục '{input_path}' để tìm file .xlsx ---")
-        excel_files = []
-        for root, dirs, files in os.walk(input_path):
-            for file in files:
-                if file.endswith('.xlsx') and not file.startswith('~$'):
-                    excel_files.append(os.path.join(root, file))
-        
-        if not excel_files:
-            print("Không tìm thấy file .xlsx nào trong thư mục được chỉ định.")
-        else:
-            print(f"Tìm thấy {len(excel_files)} file. Bắt đầu xử lý...\n")
-            for i, file_path in enumerate(excel_files):
-                print(f"\n{'='*25} [{i+1}/{len(excel_files)}] ĐANG XỬ LÝ FILE: {os.path.basename(file_path)} {'='*25}")
-                check_log_evidence(file_path)
+            total_files = len(excel_files)
+            print(f"Tìm thấy {total_files} file.")
+            start_idx = max(0, args.start - 1)
+            
+            if start_idx >= total_files:
+                print(f"Lỗi: Tham số --start ({args.start}) lớn hơn tổng số file ({total_files}).")
+            else:
+                if start_idx > 0:
+                    print(f"Bỏ qua {start_idx} file đầu tiên. Bắt đầu xử lý từ file thứ {args.start}...\n")
+                else:
+                    print("Bắt đầu xử lý...\n")
+                    
+                for i, file_path in enumerate(excel_files[start_idx:]):
+                    current_idx = start_idx + i + 1
+                    print(f"\n{'='*25} [{current_idx}/{total_files}] ĐANG XỬ LÝ FILE: {os.path.basename(file_path)} {'='*25}")
+                    check_log_evidence(file_path)
