@@ -6,6 +6,7 @@ import datetime
 import re
 import json
 import shutil
+import sys
 
 # Imports for image processing, needed by both manual Gemini and Tesseract
 try:
@@ -26,6 +27,39 @@ try:
     HAS_OCR = True
 except ImportError:
     HAS_OCR = False
+
+class ExcelPrintRedirector:
+    def __init__(self, ws=None):
+        self.ws = ws
+        self.terminal = sys.stdout
+        self.buffer = ""
+        self.encoding = getattr(sys.stdout, 'encoding', 'utf-8')
+
+    def write(self, message):
+        self.terminal.write(message)
+        self.buffer += message
+        while '\n' in self.buffer:
+            line, self.buffer = self.buffer.split('\n', 1)
+            line = line.replace('\r', '')
+            if self.ws:
+                self.ws.append([line])
+                cell = self.ws.cell(row=self.ws.max_row, column=1)
+                if "✅" in line:
+                    cell.font = openpyxl.styles.Font(color="00B050", bold=True)
+                elif "❌" in line:
+                    cell.font = openpyxl.styles.Font(color="FF0000", bold=True)
+                elif "⚠️" in line:
+                    cell.font = openpyxl.styles.Font(color="E26B0A", bold=True)
+                elif "====" in line or "---" in line or line.strip().startswith("["):
+                    cell.font = openpyxl.styles.Font(bold=True)
+
+    def flush(self):
+        self.terminal.flush()
+
+    def set_sheet(self, ws):
+        self.ws = ws
+        if self.ws:
+            self.ws.column_dimensions['A'].width = 150
 
 def get_result_sheet_name(evidence_sheet_name):
     if "共通" in evidence_sheet_name:
@@ -245,7 +279,7 @@ def check_log_evidence(file_path):
                     in_table = False
                     
                 group_count += 1
-                current_group = str(col_a_val).strip()
+                current_group = str(col_a_val).strip().replace('\n', '').replace('\r', '')
                 group_start_row = row_idx
                 in_table = False
 
@@ -344,138 +378,163 @@ def check_log_evidence(file_path):
         export_dir = os.path.join(os.path.dirname(file_path), f"Gemini_Upload_{os.path.splitext(os.path.basename(file_path))[0]}")
         os.makedirs(export_dir, exist_ok=True)
         
+        json_cache_path = os.path.join(export_dir, "gemini_result.json")
+        if os.path.exists(json_cache_path):
+            print(f"\n[GEMINI MANUAL MODE] ♻️ Đã tìm thấy file JSON kết quả cũ tại:\n{json_cache_path}")
+            print("=> Sử dụng luôn kết quả này, bỏ qua bước xuất ảnh PDF và hỏi lại Gemini.")
+            try:
+                with open(json_cache_path, "r", encoding="utf-8") as f:
+                    gemini_result = json.load(f)
+            except Exception as e:
+                print(f"❌ LỖI đọc file JSON cũ: {e}. Sẽ tiến hành xuất ảnh và hỏi lại.")
+                gemini_result = {}
+
         group_image_mapping = {}
         all_pages_for_pdf = []
         global_page_idx = 1
         group_page_ranges = {}
         
-        for g in global_all_groups:
-            u_name = g['unique_name']
-            imgs = g['images']
-            if not imgs: continue
-            
-            safe_u_name = re.sub(r'[\\/*?:"<>|]', "_", u_name)
-            
-            start_page = global_page_idx
-            if HAS_IMAGE_LIBS and len(imgs) > 0:
-                for img_data in imgs:
-                    if img_data:
-                        try:
-                            im = Image.open(io.BytesIO(img_data)).convert('RGB')
-                            
-                            num_img = Image.new('RGB', (20, 20), color=(255, 255, 0))
-                            draw = ImageDraw.Draw(num_img)
-                            draw.text((6, 4), str(global_page_idx), fill=(255, 0, 0))
-                            
-                            nearest_filter = Image.Resampling.NEAREST if hasattr(Image, 'Resampling') else Image.NEAREST
-                            num_img = num_img.resize((80, 80), nearest_filter)
-                            draw_big = ImageDraw.Draw(num_img)
-                            draw_big.rectangle([(0, 0), (79, 79)], outline=(255, 0, 0), width=4)
-                            im.paste(num_img, (im.width - 80, 0))
-                            
-                            all_pages_for_pdf.append(im)
-                            global_page_idx += 1
-                        except Exception:
-                            pass
-                group_image_mapping[u_name] = safe_u_name
-            else:
-                image_data = imgs[0]
-                if image_data:
-                    img_path = os.path.join(export_dir, f"{safe_u_name}.png")
-                    with open(img_path, "wb") as f:
-                        f.write(image_data)
-                    group_image_mapping[u_name] = safe_u_name
-            
-            end_page = global_page_idx - 1
-            if end_page >= start_page:
-                group_page_ranges[u_name] = (start_page, end_page)
-        
-        if all_pages_for_pdf:
-            combined_pdf_path = os.path.join(export_dir, f"All_Evidence.pdf")
-            all_pages_for_pdf[0].save(combined_pdf_path, "PDF", resolution=100.0, save_all=True, append_images=all_pages_for_pdf[1:])
-
-        if group_image_mapping:
-            print(f"\n[GEMINI MANUAL MODE] Đã xuất 1 file PDF gộp duy nhất cho toàn bộ file vào thư mục:\n{export_dir}")
-            
-            mapping_text = "\n".join([f"- Nhóm '{k}': Từ trang {v[0]} đến trang {v[1]}" for k, v in group_page_ranges.items()])
-            
-            prompt = (
-                "Tôi có 1 file PDF chứa nhiều trang ảnh chụp màn hình. Trên góc phải trên cùng của mỗi trang có ĐÁNH SỐ THỨ TỰ (1, 2, 3...) trong một ô màu vàng.\n"
-                "Dưới đây là danh sách phân bổ các trang cho từng nhóm Test:\n"
-                f"{mapping_text}\n\n"
-                "Hãy đọc các thông tin sau từ file PDF dựa trên KHOẢNG TRANG TƯƠNG ỨNG CỦA TỪNG NHÓM và trả về ĐÚNG 1 ĐOẠN JSON duy nhất (không có markdown ```json):\n"
-                "* LƯU Ý TỐI QUAN TRỌNG: BẠN PHẢI COPY CHÍNH XÁC TÊN NHÓM TRONG DANH SÁCH TRÊN ĐỂ LÀM KEY TRONG JSON. KHÔNG ĐƯỢC TỰ Ý ĐỔI TÊN HAY SỬA SỐ (VD: Tuyệt đối không tự đổi 1回目 thành 8回目).\n"
-                "1. Đối với nhóm có chữ 'Flow_Config': Tìm giá trị của biến 'P_JobnetID' (hoặc 'I_JobnetID') và 'P_InterfaceID' (hoặc 'I_InterfaceID') từ bảng 'フロー変数' (cột '初期値') HOẶC bảng '引数' (cột '値'). Điền vào 'jobnet_id' và 'interface_id'.\n"
-                "2. Đối với các nhóm test còn lại (ví dụ '共通_■1回目', '個別_■1回目'...):\n"
-                "   - BƯỚC 1: Tìm '実行開始' (start_time) và '正常終了' (duration_ms) từ bảng Status Panel (Hộp thoại フローの実行).\n"
-                "     * CẢNH BÁO QUAN TRỌNG 1: TUYỆT ĐỐI KHÔNG lấy giờ từ đồng hồ hệ thống (Taskbar ở góc phải dưới cùng màn hình). Chỉ tìm chuỗi có dạng '実行開始: HH:MM:SS'.\n"
-                "   - BƯỚC 2: Tìm 'jobnet_id' và 'interface_id' từ MỘT TRONG HAI bảng sau:\n"
-                "     + Bảng 1: Bảng 'フロー変数' (Flow Variables). Tìm cột '初期値' (Initial value) tương ứng với biến 'P_JobnetID' (hoặc 'I_JobnetID') và 'P_InterfaceID' (hoặc 'I_InterfaceID').\n"
-                "     + Bảng 2: Bảng '引数' (Arguments) trong hộp thoại 'フローの実行'. Tìm cột '値' (Value) tương ứng với biến 'P_JobnetID' (hoặc 'I_JobnetID') và 'P_InterfaceID' (hoặc 'I_InterfaceID').\n"
-                "     * CẢNH BÁO QUAN TRỌNG 2 (CHỐNG ĐỌC NHẦM LOG): TUYỆT ĐỐI KHÔNG lấy thông tin từ các dòng log dạng text có chứa chữ 'ジョブネットID: ...' hay 'インターフェースID: ...'. CHỈ ĐƯỢC PHÉP lấy từ 2 bảng đã nêu. Nếu trong các trang của nhóm test KHÔNG có bảng nào chứa thông tin này, BẮT BUỘC để rỗng \"\".\n"
-                "   - BƯỚC 3: TÌM FILE OUTPUT: Tìm ảnh chụp File Explorer. Chú ý SỐ THỨ TỰ ở góc ảnh, ảnh File Explorer hợp lệ phải có số thứ tự LỚN HƠN (nằm sau) ảnh Status Panel. Lấy tên file và 'Date modified' (đổi sang định dạng YYYY/MM/DD HH:MM 24h) điền vào 'file_name' và 'file_modified_time'.\n"
-                "     * CHÚ Ý 1: Đọc đường dẫn (path) thư mục trên thanh địa chỉ. NẾU đường dẫn chứa chữ 'receive', ĐÓ CHẮC CHẮN LÀ FILE INPUT -> TUYỆT ĐỐI BỎ QUA và để rỗng 'file_name'.\n"
-                "     * CHÚ Ý 2 (QUAN TRỌNG): Chỉ ghi nhận file nếu 'Date modified' của file đó BẰNG HOẶC SAU thời gian '実行開始' (start_time) của ca test hiện tại. \n"
-                "     * CHÚ Ý 3: Nếu đường dẫn KHÔNG chứa 'receive' và thời gian file hợp lệ, hãy CHỌN file có 'Date modified' MỚI NHẤT (thời gian muộn hơn).\n"
-                "     * CHÚ Ý 4: Nếu 'Date modified' của file NHỎ HƠN (diễn ra trước) thời gian '実行開始' (start_time), hoặc ca test kết thúc lỗi (戻り値 khác 0) và không sinh ra file mới, hãy hiểu đó là file cũ còn sót lại -> TUYỆT ĐỐI BỎ QUA, để rỗng \"\" cho 'file_name' và 'file_modified_time'.\n"
-                "     * CHÚ Ý 5 (TỐI QUAN TRỌNG): Đọc CHÍNH XÁC nội dung hiển thị trên ảnh (nhớ chuyển đổi PM sang 24h). KHÔNG ĐƯỢC copy 'start_time' điền vào 'file_modified_time'. KHÔNG ĐƯỢC tự ý đoán mò, bịa đặt hoặc tự đồng bộ dữ liệu. Nếu không nhìn thấy rõ chữ trên ảnh, BẮT BUỘC ĐỂ RỖNG (\"\").\n"
-                "     * CHÚ Ý 6 (CHỐNG ẢO GIÁC): TUYỆT ĐỐI KHÔNG copy 'start_time', 'duration_ms', 'jobnet_id', 'interface_id', 'file_name', 'file_modified_time' hay BẤT KỲ thông tin nào từ nhóm test trước điền vào nhóm test sau. Nếu trong các trang của nhóm test hiện tại KHÔNG CÓ thông tin, BẮT BUỘC để rỗng (\"\").\n"
-                "Nếu không tìm thấy thông tin nào, hãy để rỗng (\"\").\n\n"
-                "Cấu trúc JSON mong muốn:\n"
-                "{\n"
-                "  \"共通_Flow_Config\": {\n"
-                "    \"jobnet_id\": \"...\",\n"
-                "    \"interface_id\": \"...\"\n"
-                "  },\n"
-                "  \"<COPY Y HỆT TÊN NHÓM TRONG DANH SÁCH LÊN ĐÂY>\": {\n"
-                "    \"start_time\": \"HH:MM:SS\",\n"
-                "    \"duration_ms\": \"123\",\n"
-                "    \"jobnet_id\": \"...\",\n"
-                "    \"interface_id\": \"...\",\n"
-                "    \"file_name\": \"...\",\n"
-                "    \"file_modified_time\": \"YYYY/MM/DD HH:MM\"\n"
-                "  }\n"
-                "}"
-            )
-            
-            prompt_path = os.path.join(export_dir, "prompt.txt")
-            with open(prompt_path, "w", encoding="utf-8") as f:
-                f.write(prompt)
+        if not gemini_result:
+            for g in global_all_groups:
+                u_name = g['unique_name']
+                imgs = g['images']
+                if not imgs: continue
                 
-            print(f"📄 Đã tạo file chứa Prompt cho bạn tại:\n{prompt_path}\n")
-            print("Vui lòng upload TẤT CẢ các ảnh này lên Gemini Web và sử dụng Prompt sau:\n")
-            print("-" * 50)
-            print(prompt)
-            print("-" * 50)
-            print("Dán kết quả JSON từ Gemini vào đây (nhấn Enter 2 lần liên tiếp để kết thúc):")
+                safe_u_name = re.sub(r'[\\/*?:"<>|]', "_", u_name)
+                
+                start_page = global_page_idx
+                if HAS_IMAGE_LIBS and len(imgs) > 0:
+                    for img_data in imgs:
+                        if img_data:
+                            try:
+                                im = Image.open(io.BytesIO(img_data)).convert('RGB')
+                                
+                                num_img = Image.new('RGB', (20, 20), color=(255, 255, 0))
+                                draw = ImageDraw.Draw(num_img)
+                                draw.text((6, 4), str(global_page_idx), fill=(255, 0, 0))
+                                
+                                nearest_filter = Image.Resampling.NEAREST if hasattr(Image, 'Resampling') else Image.NEAREST
+                                num_img = num_img.resize((80, 80), nearest_filter)
+                                draw_big = ImageDraw.Draw(num_img)
+                                draw_big.rectangle([(0, 0), (79, 79)], outline=(255, 0, 0), width=4)
+                                im.paste(num_img, (im.width - 80, 0))
+                                
+                                all_pages_for_pdf.append(im)
+                                global_page_idx += 1
+                            except Exception:
+                                pass
+                    group_image_mapping[u_name] = safe_u_name
+                else:
+                    image_data = imgs[0]
+                    if image_data:
+                        img_path = os.path.join(export_dir, f"{safe_u_name}.png")
+                        with open(img_path, "wb") as f:
+                            f.write(image_data)
+                        group_image_mapping[u_name] = safe_u_name
+                
+                end_page = global_page_idx - 1
+                if end_page >= start_page:
+                    group_page_ranges[u_name] = (start_page, end_page)
             
-            json_lines = []
-            empty_streak = 0
-            while True:
-                try:
-                    line = input()
-                    if line.strip() == '':
-                        empty_streak += 1
-                        if empty_streak >= 2:
-                            break
-                    else:
-                        empty_streak = 0
-                    json_lines.append(line)
-                except EOFError:
-                    break
+            if all_pages_for_pdf:
+                combined_pdf_path = os.path.join(export_dir, f"All_Evidence.pdf")
+                all_pages_for_pdf[0].save(combined_pdf_path, "PDF", resolution=100.0, save_all=True, append_images=all_pages_for_pdf[1:])
+    
+            if group_image_mapping:
+                print(f"\n[GEMINI MANUAL MODE] Đã xuất 1 file PDF gộp duy nhất cho toàn bộ file vào thư mục:\n{export_dir}")
+                
+                mapping_text = "\n".join([f"- Nhóm '{k}': Từ trang {v[0]} đến trang {v[1]}" for k, v in group_page_ranges.items()])
+                
+                prompt = (
+                    "Tôi có 1 file PDF chứa nhiều trang ảnh chụp màn hình. Trên góc phải trên cùng của mỗi trang có ĐÁNH SỐ THỨ TỰ (1, 2, 3...) trong một ô màu vàng.\n"
+                    "Dưới đây là danh sách phân bổ các trang cho từng nhóm Test:\n"
+                    f"{mapping_text}\n\n"
+                    "Hãy đọc các thông tin sau từ file PDF dựa trên KHOẢNG TRANG TƯƠNG ỨNG CỦA TỪNG NHÓM và trả về ĐÚNG 1 ĐOẠN JSON duy nhất (không có markdown ```json):\n"
+                    "* LƯU Ý TỐI QUAN TRỌNG: BẠN PHẢI COPY CHÍNH XÁC TÊN NHÓM TRONG DANH SÁCH TRÊN ĐỂ LÀM KEY TRONG JSON. KHÔNG ĐƯỢC TỰ Ý ĐỔI TÊN HAY SỬA SỐ (VD: Tuyệt đối không tự đổi 1回目 thành 8回目).\n"
+                    "1. Đối với nhóm có chữ 'Flow_Config': Tìm giá trị của biến 'P_JobnetID' (hoặc 'I_JobnetID') và 'P_InterfaceID' (hoặc 'I_InterfaceID') từ bảng 'フロー変数' (cột '初期値') HOẶC bảng '引数' (cột '値'). Điền vào 'jobnet_id' và 'interface_id'.\n"
+                    "2. Đối với các nhóm test còn lại (ví dụ '共通_■1回目', '個別_■1回目'...):\n"
+                    "   - BƯỚC 1: Tìm '実行開始' (start_time) và '正常終了' (duration_ms) từ bảng Status Panel (Hộp thoại フローの実行).\n"
+                    "     * CẢNH BÁO QUAN TRỌNG 1: TUYỆT ĐỐI KHÔNG lấy giờ từ đồng hồ hệ thống (Taskbar ở góc phải dưới cùng màn hình). Chỉ tìm chuỗi có dạng '実行開始: HH:MM:SS'. Nhớ là giá trị này phải lấy giống ảnh. vì cần check. nếu sai thì kết quả cũng sai \n "
+                    "   - BƯỚC 2: Tìm 'jobnet_id' và 'interface_id' từ MỘT TRONG HAI bảng sau:\n"
+                    "     + Bảng 1: Bảng 'フロー変数' (Flow Variables). Tìm cột '初期値' (Initial value) tương ứng với biến 'P_JobnetID' (hoặc 'I_JobnetID') và 'P_InterfaceID' (hoặc 'I_InterfaceID').\n"
+                    "     + Bảng 2: Bảng '引数' (Arguments) trong hộp thoại 'フローの実行'. Tìm cột '値' (Value) tương ứng với biến 'P_JobnetID' (hoặc 'I_JobnetID') và 'P_InterfaceID' (hoặc 'I_InterfaceID').\n"
+                    "     * CẢNH BÁO QUAN TRỌNG 2 (CHỐNG ĐỌC NHẦM LOG): TUYỆT ĐỐI KHÔNG lấy thông tin từ các dòng log dạng text có chứa chữ 'ジョブネットID: ...' hay 'インターフェースID: ...'. CHỈ ĐƯỢC PHÉP lấy từ 2 bảng đã nêu. Nếu trong các trang của nhóm test KHÔNG có bảng nào chứa thông tin này, BẮT BUỘC để rỗng \"\".\n"
+                    "   - BƯỚC 3: TÌM FILE OUTPUT: Tìm ảnh chụp File Explorer. Chú ý SỐ THỨ TỰ ở góc ảnh, ảnh File Explorer hợp lệ phải có số thứ tự LỚN HƠN (nằm sau) ảnh Status Panel. Lấy tên file và 'Date modified' (đổi sang định dạng YYYY/MM/DD HH:MM 24h) điền vào 'file_name' và 'file_modified_time'.\n"
+                    "     * CHÚ Ý 1: Đọc đường dẫn (path) thư mục trên thanh địa chỉ. NẾU đường dẫn chứa chữ 'receive', ĐÓ CHẮC CHẮN LÀ FILE INPUT -> TUYỆT ĐỐI BỎ QUA và để rỗng 'file_name'.\n"
+                    "     * CHÚ Ý 2 (QUAN TRỌNG): Chỉ ghi nhận file nếu 'Date modified' của file đó BẰNG HOẶC SAU thời gian '実行開始' (start_time) của ca test hiện tại. \n"
+                    "     * CHÚ Ý 3: Nếu đường dẫn KHÔNG chứa 'receive' và thời gian file hợp lệ, hãy CHỌN file có 'Date modified' MỚI NHẤT (thời gian muộn hơn).\n"
+                    "     * CHÚ Ý 4: Nếu 'Date modified' của file NHỎ HƠN (diễn ra trước) thời gian '実行開始' (start_time), hoặc ca test kết thúc lỗi (戻り値 khác 0) và không sinh ra file mới, hãy hiểu đó là file cũ còn sót lại -> TUYỆT ĐỐI BỎ QUA, để rỗng \"\" cho 'file_name' và 'file_modified_time'.\n"
+                    "     * CHÚ Ý 5 (TỐI QUAN TRỌNG): Đọc CHÍNH XÁC nội dung hiển thị trên ảnh (nhớ chuyển đổi PM sang 24h). KHÔNG ĐƯỢC copy 'start_time' điền vào 'file_modified_time'. KHÔNG ĐƯỢC tự ý đoán mò, bịa đặt hoặc tự đồng bộ dữ liệu. Nếu không nhìn thấy rõ chữ trên ảnh, BẮT BUỘC ĐỂ RỖNG (\"\").\n"
+                    "     * CHÚ Ý 6 (CHỐNG ẢO GIÁC): TUYỆT ĐỐI KHÔNG copy 'start_time', 'duration_ms', 'jobnet_id', 'interface_id', 'file_name', 'file_modified_time' hay BẤT KỲ thông tin nào từ nhóm test trước điền vào nhóm test sau. Nếu trong các trang của nhóm test hiện tại KHÔNG CÓ thông tin, BẮT BUỘC để rỗng (\"\").\n"
+                    "   - BƯỚC 4: TÌM ẢNH LOG VIEWER (Nhận biết: Ảnh có chữ 'ログ設定名' hoặc 'アプリケーション' hoặc giao diện xem log). Tìm NGÀY và GIỜ của dòng cuối cùng (thường chứa chữ 'サブフローの実行が終了しました') và điền vào 'log_image_time' theo định dạng 'YYYY/MM/DD HH:MM:SS'. Nếu chỉ hiển thị giờ thì điền 'HH:MM:SS'. Nếu không có ảnh log, để rỗng \"\".\n"
+                    "Nếu không tìm thấy thông tin nào, hãy để rỗng (\"\").\n\n"
+                    "Cấu trúc JSON mong muốn:\n"
+                    "{\n"
+                    "  \"共通_Flow_Config\": {\n"
+                    "    \"jobnet_id\": \"...\",\n"
+                    "    \"interface_id\": \"...\"\n"
+                    "  },\n"
+                    "  \"<COPY Y HỆT TÊN NHÓM TRONG DANH SÁCH LÊN ĐÂY>\": {\n"
+                    "    \"start_time\": \"HH:MM:SS\",\n"
+                    "    \"duration_ms\": \"123\",\n"
+                    "    \"jobnet_id\": \"...\",\n"
+                    "    \"interface_id\": \"...\",\n"
+                    "    \"file_name\": \"...\",\n"
+                    "    \"file_modified_time\": \"YYYY/MM/DD HH:MM\",\n"
+                    "    \"log_image_time\": \"YYYY/MM/DD HH:MM:SS\"\n"
+                    "  }\n"
+                    "}"
+                )
+                
+                prompt_path = os.path.join(export_dir, "prompt.txt")
+                with open(prompt_path, "w", encoding="utf-8") as f:
+                    f.write(prompt)
                     
-            json_str = "\n".join(json_lines).strip()
-            if json_str.startswith("```json"): json_str = json_str[7:]
-            if json_str.startswith("```"): json_str = json_str[3:]
-            if json_str.endswith("```"): json_str = json_str[:-3]
-            
-            try:
-                if json_str:
-                    gemini_result = json.loads(json_str)
-                    print("✅ Đã parse JSON thành công!")
-            except Exception as e:
-                print(f"❌ LỖI parse JSON: {e}")
-                print("Sẽ fallback về Tesseract OCR...")
+                print(f"📄 Đã tạo file chứa Prompt cho bạn tại:\n{prompt_path}\n")
+                print("Vui lòng upload TẤT CẢ các ảnh này lên Gemini Web và sử dụng Prompt sau:\n")
+                print("-" * 50)
+                print(prompt)
+                print("-" * 50)
+                print("Dán kết quả JSON từ Gemini vào đây (nhấn Enter 2 lần liên tiếp để kết thúc):")
+                
+                # Tạm thời khôi phục lại stdout thực của terminal để giao diện console không bị ẩn do Redirector
+                original_stdout = sys.stdout
+                if hasattr(sys.stdout, 'terminal'):
+                    sys.stdout = sys.stdout.terminal
+                    
+                try:
+                    json_lines = []
+                    empty_streak = 0
+                    while True:
+                        try:
+                            line = input()
+                            if line.strip() == '':
+                                empty_streak += 1
+                                if empty_streak >= 2:
+                                    break
+                            else:
+                                empty_streak = 0
+                            json_lines.append(line)
+                        except EOFError:
+                            break
+                finally:
+                    sys.stdout = original_stdout
+                        
+                json_str = "\n".join(json_lines).strip()
+                if json_str.startswith("```json"): json_str = json_str[7:]
+                if json_str.startswith("```"): json_str = json_str[3:]
+                if json_str.endswith("```"): json_str = json_str[:-3]
+                
+                try:
+                    if json_str:
+                        gemini_result = json.loads(json_str)
+                        print("✅ Đã parse JSON thành công!")
+                        with open(json_cache_path, "w", encoding="utf-8") as f:
+                            json.dump(gemini_result, f, ensure_ascii=False, indent=4)
+                        print(f"💾 Đã lưu kết quả JSON vào: {json_cache_path}")
+                except Exception as e:
+                    print(f"❌ LỖI parse JSON: {e}")
+                    print("Sẽ fallback về Tesseract OCR...")
 
     last_sheet = None
     for g in global_all_groups:
@@ -502,7 +561,13 @@ def check_log_evidence(file_path):
                         if not desc: 
                             desc = t # Nếu xóa xong mất hết chữ (VD test chỉ tên là "■1回目") thì lấy lại nguyên bản
                         # Đồng bộ khoảng trắng, dấu ngoặc, mũi tên
-                        return desc.replace(' ', '').replace('　', '').replace('(', '（').replace(')', '）').replace('->', '→').replace('−＞', '→').lower()
+                        desc = desc.replace(' ', '').replace('　', '').replace('\n', '').replace('\r', '')
+                        desc = desc.replace('(', '（').replace(')', '）').replace('->', '→').replace('−＞', '→')
+                        desc = desc.replace('细', '細') # Fix AI nhầm chữ Hán
+                        for hw, fw in zip("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ", 
+                                          "０１２３４５６７８９ａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐｑｒｓｔｕｖｗｘｙｚＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴＵＶＷＸＹＺ"):
+                            desc = desc.replace(fw, hw)
+                        return desc.lower()
                         
                     g_desc = get_desc(g['group_name'])
                     
@@ -512,12 +577,32 @@ def check_log_evidence(file_path):
                             pre_ocr = v
                             break
                             
-                    # Ưu tiên 2: Khớp một phần (nếu AI cắt bớt chữ dài)
+                    # Ưu tiên 2: Khớp chính xác sau khi bỏ ký tự đặc biệt (Siêu linh hoạt)
+                    if not pre_ocr:
+                        g_pure = re.sub(r'\W+', '', g_desc)
+                        for k, v in gemini_result.items():
+                            if sheet_prefix in k:
+                                k_pure = re.sub(r'\W+', '', get_desc(k))
+                                if g_pure and k_pure and g_pure == k_pure:
+                                    pre_ocr = v
+                                    break
+
+                    # Ưu tiên 3: Khớp một phần (nếu AI cắt bớt chữ dài)
                     if not pre_ocr:
                         for k, v in gemini_result.items():
                             if sheet_prefix in k:
                                 k_desc = get_desc(k)
                                 if (g_desc in k_desc) or (k_desc in g_desc):
+                                    pre_ocr = v
+                                    break
+
+                    # Ưu tiên 4: Khớp một phần sau khi bỏ ký tự đặc biệt
+                    if not pre_ocr:
+                        g_pure = re.sub(r'\W+', '', g_desc)
+                        for k, v in gemini_result.items():
+                            if sheet_prefix in k:
+                                k_pure = re.sub(r'\W+', '', get_desc(k))
+                                if g_pure and k_pure and (g_pure in k_pure or k_pure in g_pure):
                                     pre_ocr = v
                                     break
             analyze_group(
@@ -656,7 +741,7 @@ def analyze_group(group_name, data, rs, rs_name, group_images=None, file_name=""
         panel_duration_ms = pre_ocr_result.get("duration_ms")
         jobnet_id = pre_ocr_result.get("jobnet_id")
         interface_id = pre_ocr_result.get("interface_id")
-        end_time_log_img = pre_ocr_result.get("end_time_log_img")
+        log_image_time = pre_ocr_result.get("log_image_time")
 
         if jobnet_id is not None:
             print(f"  - [Ảnh Status Panel]: Tìm thấy Jobnet ID: '{jobnet_id}'")
@@ -682,7 +767,7 @@ def analyze_group(group_name, data, rs, rs_name, group_images=None, file_name=""
             print("  - [Ảnh Status Panel]: ⚠️ Đang dùng Tesseract OCR (độ chính xác thấp hơn)...")
         panel_start_time = None
         panel_duration_ms = None
-        end_time_log_img = None
+        log_image_time = None
         for idx, image_data in enumerate(group_images):
             try:
                 if image_data:
@@ -814,7 +899,7 @@ def analyze_group(group_name, data, rs, rs_name, group_images=None, file_name=""
                 except ValueError:
                     print(f"      ⚠️ Không thể so sánh thời gian: Log ({first_log_time_str}), Ảnh ({panel_start_time})")
     else:
-        print("  - [Ảnh Status Panel]: ⚠️ Không tìm thấy hoặc không đọc được thời gian '実行開始:' từ ảnh.")
+        print("  - [Ảnh Status Panel]: ❌ LỖI: Không tìm thấy hoặc không đọc được thời gian '実行開始:' từ ảnh.")
 
     log_duration_ms = None
     log_end_time_str = None
@@ -858,22 +943,50 @@ def analyze_group(group_name, data, rs, rs_name, group_images=None, file_name=""
         else:
             print(f"      ⚠️ Không tìm thấy dòng log 'サブフローの実行が終了しました' chứa thời gian '[Nms]' hoặc '[N]' để so sánh Duration.")
 
-    if end_time_log_img:
-        print(f"  - [Ảnh Log Viewer]: Tìm thấy giờ kết thúc (サブフローの実行が終了しました) là {end_time_log_img}")
+    if log_image_time:
+        print(f"  - [Ảnh Log Viewer]: Tìm thấy thời gian kết thúc trong ảnh log là '{log_image_time}'")
+        
+        img_date_str = None
+        img_time_str = log_image_time
+        if " " in log_image_time:
+            parts = log_image_time.split(" ")
+            img_date_str = parts[0].replace("-", "/")
+            img_time_str = parts[1]
+            
         if log_end_time_str:
             try:
                 fmt = "%H:%M:%S"
-                t_img = datetime.datetime.strptime(end_time_log_img, fmt).time()
+                t_img = datetime.datetime.strptime(img_time_str, fmt).time()
                 t_txt = datetime.datetime.strptime(log_end_time_str, fmt).time()
                 
                 if t_img == t_txt:
-                    print(f"      ✅ OK: Thời gian kết thúc trong ảnh ({end_time_log_img}) KHỚP với log text ({log_end_time_str}).")
+                    print(f"      ✅ OK: Giờ kết thúc trong ảnh Log ({img_time_str}) KHỚP với log text ({log_end_time_str}).")
                 else:
-                    print(f"      ❌ LỖI: Thời gian kết thúc trong ảnh ({end_time_log_img}) LỆCH với log text ({log_end_time_str}).")
+                    print(f"      ❌ LỖI: Giờ kết thúc trong ảnh Log ({img_time_str}) LỆCH với log text ({log_end_time_str}).")
             except ValueError:
-                print(f"      ⚠️ Không thể so sánh thời gian kết thúc: Ảnh ({end_time_log_img}), Log ({log_end_time_str})")
+                print(f"      ⚠️ Không thể so sánh giờ kết thúc: Ảnh ({img_time_str}), Log ({log_end_time_str})")
+                
+            if img_date_str and sorted_dates:
+                log_date_str = sorted_dates[-1]
+                if img_date_str == log_date_str:
+                    print(f"      ✅ OK: Ngày trong ảnh Log ({img_date_str}) KHỚP với ngày log text ({log_date_str}).")
+                else:
+                    print(f"      ❌ LỖI: Ngày trong ảnh Log ({img_date_str}) LỆCH với ngày log text ({log_date_str}).")
         else:
             print(f"      ⚠️ Không tìm thấy thời gian kết thúc trong log text để đối chiếu.")
+            
+        if panel_start_time:
+            try:
+                t_start = datetime.datetime.strptime(panel_start_time, "%H:%M:%S").time()
+                t_img = datetime.datetime.strptime(img_time_str, "%H:%M:%S").time()
+                if t_img >= t_start:
+                    print(f"      ✅ OK: Giờ ảnh Log ({img_time_str}) >= Giờ bắt đầu ({panel_start_time}).")
+                else:
+                    print(f"      ❌ LỖI: Giờ ảnh Log ({img_time_str}) < Giờ bắt đầu ({panel_start_time}).")
+            except ValueError:
+                pass
+    else:
+        print(f"  - [Ảnh Log Viewer]: ⚠️ CẢNH BÁO: Không tìm thấy ảnh chụp màn hình Log (không có chữ ログ設定名 / アプリケーション) hoặc không đọc được thời gian.")
 
     if jobnet_id is not None and data:
         jobnet_in_log = False
@@ -906,6 +1019,25 @@ def analyze_group(group_name, data, rs, rs_name, group_images=None, file_name=""
 
     file_name_ocr = pre_ocr_result.get("file_name") if pre_ocr_result else None
     file_modified_time = pre_ocr_result.get("file_modified_time") if pre_ocr_result else None
+
+    # Kiểm tra File name trong Log text
+    log_filename_found = None
+    if data:
+        for item in data:
+            msg = str(item.get('message', ''))
+            m_file = re.search(r'ファイル名[：:]([^\s　]+)', msg)
+            if m_file:
+                log_filename_found = m_file.group(1)
+                break
+                
+    if log_filename_found:
+        print(f"  - [Kiểm tra File]: Log text báo có tạo ra file '{log_filename_found}'.")
+        if not file_name_ocr:
+            print(f"      ❌ LỖI: Log báo có tạo file nhưng không tìm thấy ảnh chụp File Explorer chứa file này!")
+        elif log_filename_found.lower() == file_name_ocr.lower():
+            print(f"      ✅ OK: Tên file trong ảnh File Explorer ({file_name_ocr}) KHỚP với tên file trong Log text.")
+        else:
+            print(f"      ❌ LỖI: Tên file trong ảnh File Explorer ({file_name_ocr}) KHÔNG KHỚP với tên file trong Log text ({log_filename_found}).")
 
     if file_name_ocr and file_modified_time:
         print(f"  - [Ảnh File Explorer]: Tìm thấy file '{file_name_ocr}' có Date modified là '{file_modified_time}'")
@@ -1084,40 +1216,75 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Tool kiểm tra Evidence Log (Sort tăng dần, check thời gian) cho file hoặc folder.")
     parser.add_argument("path", help="Đường dẫn file excel hoặc thư mục chứa các file excel.")
     parser.add_argument("--start", type=int, default=1, help="Vị trí file bắt đầu xử lý (1-based, mặc định: 1)")
+    parser.add_argument("--out-excel", type=str, default="Evidence_Check_Report.xlsx", help="Tên file Excel xuất báo cáo")
     args = parser.parse_args()
     
     input_path = args.path
+    out_excel_path = args.out_excel
 
-    if not os.path.exists(input_path):
-        print(f"Lỗi: Đường dẫn không tồn tại: {input_path}")
-    elif os.path.isfile(input_path):
-        # Nếu là một file đơn lẻ, xử lý trực tiếp
-        check_log_evidence(input_path)
-    elif os.path.isdir(input_path):
-        # Nếu là một thư mục, quét đệ quy để tìm file .xlsx
-        print(f"--- Đang quét thư mục '{input_path}' để tìm file .xlsx ---")
-        excel_files = []
-        for root, dirs, files in os.walk(input_path):
-            for file in files:
-                if file.endswith('.xlsx') and not file.startswith('~$'):
-                    excel_files.append(os.path.join(root, file))
-        
-        if not excel_files:
-            print("Không tìm thấy file .xlsx nào trong thư mục được chỉ định.")
-        else:
-            total_files = len(excel_files)
-            print(f"Tìm thấy {total_files} file.")
-            start_idx = max(0, args.start - 1)
+    report_wb = openpyxl.Workbook()
+    if report_wb.active:
+        report_wb.remove(report_wb.active)
+
+    redirector = ExcelPrintRedirector(None)
+    sys.stdout = redirector
+
+    try:
+        if not os.path.exists(input_path):
+            print(f"Lỗi: Đường dẫn không tồn tại: {input_path}")
+        elif os.path.isfile(input_path):
+            if args.start != 1:
+                print(f"⚠️ Cảnh báo: Tham số --start={args.start} bị bỏ qua vì bạn đang truyền vào 1 file duy nhất thay vì 1 thư mục.")
             
-            if start_idx >= total_files:
-                print(f"Lỗi: Tham số --start ({args.start}) lớn hơn tổng số file ({total_files}).")
+            sheet_title = os.path.splitext(os.path.basename(input_path))[0][:31]
+            ws = report_wb.create_sheet(title=sheet_title)
+            redirector.set_sheet(ws)
+            check_log_evidence(input_path)
+        elif os.path.isdir(input_path):
+            print(f"--- Đang quét thư mục '{input_path}' để tìm file .xlsx ---")
+            excel_files = []
+            for root, dirs, files in os.walk(input_path):
+                for file in files:
+                    if file.endswith('.xlsx') and not file.startswith('~$'):
+                        excel_files.append(os.path.join(root, file))
+            
+            if not excel_files:
+                print("Không tìm thấy file .xlsx nào trong thư mục được chỉ định.")
             else:
-                if start_idx > 0:
-                    print(f"Bỏ qua {start_idx} file đầu tiên. Bắt đầu xử lý từ file thứ {args.start}...\n")
+                excel_files.sort()
+                total_files = len(excel_files)
+                print(f"Tìm thấy {total_files} file.")
+                start_idx = max(0, args.start - 1)
+                
+                if start_idx >= total_files:
+                    print(f"Lỗi: Tham số --start ({args.start}) lớn hơn tổng số file ({total_files}).")
                 else:
-                    print("Bắt đầu xử lý...\n")
-                    
-                for i, file_path in enumerate(excel_files[start_idx:]):
-                    current_idx = start_idx + i + 1
-                    print(f"\n{'='*25} [{current_idx}/{total_files}] ĐANG XỬ LÝ FILE: {os.path.basename(file_path)} {'='*25}")
-                    check_log_evidence(file_path)
+                    if start_idx > 0:
+                        print(f"Bỏ qua {start_idx} file đầu tiên. Bắt đầu xử lý từ file thứ {args.start}...\n")
+                    else:
+                        print("Bắt đầu xử lý...\n")
+                        
+                    for i, file_path in enumerate(excel_files[start_idx:]):
+                        current_idx = start_idx + i + 1
+                        
+                        sheet_title = os.path.splitext(os.path.basename(file_path))[0][:31]
+                        base_title = sheet_title
+                        counter = 1
+                        while sheet_title in report_wb.sheetnames:
+                            suffix = f"_{counter}"
+                            sheet_title = base_title[:31-len(suffix)] + suffix
+                            counter += 1
+                            
+                        ws = report_wb.create_sheet(title=sheet_title)
+                        redirector.set_sheet(ws)
+                        
+                        print(f"\n{'='*25} [{current_idx}/{total_files}] ĐANG XỬ LÝ FILE: {os.path.basename(file_path)} {'='*25}")
+                        check_log_evidence(file_path)
+    finally:
+        sys.stdout = redirector.terminal
+        if len(report_wb.sheetnames) > 0:
+            try:
+                report_wb.save(out_excel_path)
+                print(f"\n✅ Đã xuất báo cáo tổng hợp ra file Excel: {os.path.abspath(out_excel_path)}")
+            except Exception as e:
+                print(f"\n❌ Lỗi khi lưu file báo cáo Excel: {e}")
