@@ -1,0 +1,141 @@
+{
+    "共通_Flow_Config": {
+        "jobnet_id": "P1J0609@10609",
+        "interface_id": "RFSH0609"
+    },
+    "共通_■1回目 正常系・1000件未満・ファイル送信前結合有無=false": {
+        "start_time": "16:24:55",
+        "duration_ms": "455",
+        "jobnet_id": "P1J0609@10609",
+        "interface_id": "RFSH0609",
+        "file_name": "RFSH0609_output.tsv",
+        "file_modified_time": "2026/05/18 16:24",
+        "log_image_time": "16:24:55"
+    },
+    "共通_■2回目 異常系・起動パラメータ不正": {
+        "start_time": "16:28:39",
+        "duration_ms": "216",
+        "jobnet_id": "",
+        "interface_id": "",
+        "file_name": "",
+        "file_modified_time": "",
+        "log_image_time": "16:28:39"
+    },
+    "共通_■3回目 正常系・ファイル送信前結合有無=true": {
+        "start_time": "16:32:04",
+        "duration_ms": "613",
+        "jobnet_id": "P1J0609@10609",
+        "interface_id": "RFSH0609",
+        "file_name": "RFSH0609_output.tsv",
+        "file_modified_time": "2026/05/18 16:32",
+        "log_image_time": "16:32:04"
+    },
+    "共通_■4回目 異常系・すでにファイルが存在する場合": {
+        "start_time": "16:34:40",
+        "duration_ms": "757",
+        "jobnet_id": "P1J0609@10609",
+        "interface_id": "RFSH0609",
+        "file_name": "",
+        "file_modified_time": "",
+        "log_image_time": "16:34:41"
+    },
+    "共通_■5回目 正常系・0byteファイル": {
+        "start_time": "16:38:56",
+        "duration_ms": "375",
+        "jobnet_id": "P1J0609@10609",
+        "interface_id": "RFSH0609",
+        "file_name": "RFSH0609_output.tsv",
+        "file_modified_time": "2026/05/18 16:38",
+        "log_image_time": ""
+    },
+    "共通_■6回目 正常系・データ行1000行": {
+        "start_time": "16:42:23",
+        "duration_ms": "1137",
+        "jobnet_id": "P1J0609@10609",
+        "interface_id": "RFSH0609",
+        "file_name": "RFSH0609_output.tsv",
+        "file_modified_time": "2026/05/18 16:42",
+        "log_image_time": "16:42:24"
+    },
+    "共通_■7回目 正常系・データ行1000行以上": {
+        "start_time": "16:45:12",
+        "duration_ms": "832",
+        "jobnet_id": "P1J0609@10609",
+        "interface_id": "RFSH0609",
+        "file_name": "RFSH0609_output.tsv",
+        "file_modified_time": "2026/05/18 16:45",
+        "log_image_time": "16:45:13"
+    },
+    "個別_■1回目 正常系・0byteファイル": {
+        "start_time": "16:52:28",
+        "duration_ms": "601",
+        "jobnet_id": "P1J0609@10609",
+        "interface_id": "RFSH0609",
+        "file_name": "RFSH0609_output.tsv",
+        "file_modified_time": "2026/05/18 16:52",
+        "log_image_time": ""
+    },
+    "個別_■2回目 正常系・全項目空データファイル": {
+        "start_time": "16:54:29",
+        "duration_ms": "909",
+        "jobnet_id": "P1J0609@10609",
+        "interface_id": "RFSH0609",
+        "file_name": "RFSH0609_output.tsv",
+        "file_modified_time": "2026/05/18 16:54",
+        "log_image_time": ""
+    },
+    "個別_■3回目 正常系・ファイル定義確認": {
+        "start_time": "16:56:42",
+        "duration_ms": "785",
+        "jobnet_id": "P1J0609@10609",
+        "interface_id": "RFSH0609",
+        "file_name": "RFSH0609_output.tsv",
+        "file_modified_time": "2026/05/18 16:56",
+        "log_image_time": ""
+    },
+    "個別_■4回目正常系・列分割→行変換確認（明細0件）": {
+        "start_time": "16:58:24",
+        "duration_ms": "711",
+        "jobnet_id": "P1J0609@10609",
+        "interface_id": "RFSH0609",
+        "file_name": "RFSH0609_output.tsv",
+        "file_modified_time": "2026/05/18 16:58",
+        "log_image_time": ""
+    },
+    "個別_■5回目正常系・列分割→行変換確認（明細1件）": {
+        "start_time": "17:00:48",
+        "duration_ms": "794",
+        "jobnet_id": "P1J0609@10609",
+        "interface_id": "RFSH0609",
+        "file_name": "RFSH0609_output.tsv",
+        "file_modified_time": "2026/05/18 17:00",
+        "log_image_time": ""
+    },
+    "個別_■6回目正常系・列分割→行変換確認（明細4件）": {
+        "start_time": "17:02:36",
+        "duration_ms": "511",
+        "jobnet_id": "P1J0609@10609",
+        "interface_id": "RFSH0609",
+        "file_name": "RFSH0609_output.tsv",
+        "file_modified_time": "2026/05/18 17:02",
+        "log_image_time": ""
+    },
+    "個別_■7回目正常系・列分割→行変換確認（明細8件）": {
+        "start_time": "17:04:46",
+        "duration_ms": "723",
+        "jobnet_id": "P1J0609@10609",
+        "interface_id": "RFSH0609",
+        "file_name": "RFSH0609_output.tsv",
+        "file_modified_time": "2026/05/18 17:04",
+        "log_image_time": ""
+    },
+    "個別_■8回目正常系・列分割→行変換確認（レコードが複数件あり）": {
+        "start_time": "17:06:47",
+        "duration_ms": "702",
+        "jobnet_id": "P1J0609@10609",
+        "interface_id": "RFSH0609",
+        "file_name": "RFSH0609_output.tsv",
+        "file_modified_time": "2026/05/18 17:06",
+        "log_image_time": ""
+    }
+}

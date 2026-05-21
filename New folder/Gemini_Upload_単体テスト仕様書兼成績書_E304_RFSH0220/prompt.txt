@@ -1,0 +1,55 @@
+Tôi có 1 file PDF chứa nhiều trang ảnh chụp màn hình. Trên góc phải trên cùng của mỗi trang có ĐÁNH SỐ THỨ TỰ (1, 2, 3...) trong một ô màu vàng.
+Dưới đây là danh sách phân bổ các trang cho từng nhóm Test:
+- Nhóm '共通_Flow_Config': Từ trang 1 đến trang 3
+- Nhóm '共通_■1回目 正常系・1000件未満・ファイル送信前結合有無=false': Từ trang 4 đến trang 12
+- Nhóm '共通_■2回目 異常系・起動パラメータ不正': Từ trang 13 đến trang 15
+- Nhóm '共通_■3回目 正常系・ファイル送信前結合有無=true': Từ trang 16 đến trang 19
+- Nhóm '共通_■4回目 異常系・すでにファイルが存在する場合': Từ trang 20 đến trang 23
+- Nhóm '共通_■5回目 正常系・0byteファイル': Từ trang 24 đến trang 28
+- Nhóm '共通_■6回目 正常系・データ行1000行': Từ trang 29 đến trang 35
+- Nhóm '共通_■7回目 正常系・データ行1000行以上': Từ trang 36 đến trang 40
+- Nhóm '個別_■1回目 正常系・0byteファイル': Từ trang 41 đến trang 45
+- Nhóm '個別_■2回目 正常系・全項目空データファイル': Từ trang 46 đến trang 50
+- Nhóm '個別_■3回目 正常系・ファイル定義確認': Từ trang 51 đến trang 55
+- Nhóm '個別_■4回目正常系・列分割→行変換確認（明細0件）': Từ trang 56 đến trang 60
+- Nhóm '個別_■5回目正常系・列分割→行変換確認（明細1件）': Từ trang 61 đến trang 65
+- Nhóm '個別_■6回目正常系・列分割→行変換確認（明細4件）': Từ trang 66 đến trang 69
+- Nhóm '個別_■7回目正常系・列分割→行変換確認（明細8件）': Từ trang 70 đến trang 73
+- Nhóm '個別_■8回目正常系・列分割→行変換確認（レコードが複数件あり）': Từ trang 74 đến trang 77
+
+Hãy đọc các thông tin sau từ file PDF dựa trên KHOẢNG TRANG TƯƠNG ỨNG CỦA TỪNG NHÓM và trả về ĐÚNG 1 ĐOẠN JSON duy nhất (không có markdown ```json):
+* LƯU Ý TỐI QUAN TRỌNG: BẠN PHẢI COPY CHÍNH XÁC TÊN NHÓM TRONG DANH SÁCH TRÊN ĐỂ LÀM KEY TRONG JSON. KHÔNG ĐƯỢC TỰ Ý ĐỔI TÊN HAY SỬA SỐ (VD: Tuyệt đối không tự đổi 1回目 thành 8回目).
+1. Đối với nhóm có chữ 'Flow_Config': Tìm giá trị của biến 'P_JobnetID' (hoặc 'I_JobnetID') và 'P_InterfaceID' (hoặc 'I_InterfaceID') từ bảng 'フロー変数' (cột '初期値') HOẶC bảng '引数' (cột '値'). Điền vào 'jobnet_id' và 'interface_id'.
+2. Đối với các nhóm test còn lại (ví dụ '共通_■1回目', '個別_■1回目'...):
+   - BƯỚC 1: Tìm '実行開始' (start_time) và '正常終了' (duration_ms) từ bảng Status Panel (Hộp thoại フローの実行).
+     * CẢNH BÁO QUAN TRỌNG 1: TUYỆT ĐỐI KHÔNG lấy giờ từ đồng hồ hệ thống (Taskbar ở góc phải dưới cùng màn hình). Chỉ tìm chuỗi có dạng '実行開始: HH:MM:SS'. Nhớ là giá trị này phải lấy giống ảnh. vì cần check. nếu sai thì kết quả cũng sai 
+    - BƯỚC 2: Tìm 'jobnet_id' và 'interface_id' từ MỘT TRONG HAI bảng sau:
+     + Bảng 1: Bảng 'フロー変数' (Flow Variables). Tìm cột '初期値' (Initial value) tương ứng với biến 'P_JobnetID' (hoặc 'I_JobnetID') và 'P_InterfaceID' (hoặc 'I_InterfaceID').
+     + Bảng 2: Bảng '引数' (Arguments) trong hộp thoại 'フローの実行'. Tìm cột '値' (Value) tương ứng với biến 'P_JobnetID' (hoặc 'I_JobnetID') và 'P_InterfaceID' (hoặc 'I_InterfaceID').
+     * CẢNH BÁO QUAN TRỌNG 2 (CHỐNG ĐỌC NHẦM LOG): TUYỆT ĐỐI KHÔNG lấy thông tin từ các dòng log dạng text có chứa chữ 'ジョブネットID: ...' hay 'インターフェースID: ...'. CHỈ ĐƯỢC PHÉP lấy từ 2 bảng đã nêu. Nếu trong các trang của nhóm test KHÔNG có bảng nào chứa thông tin này, BẮT BUỘC để rỗng "".
+   - BƯỚC 3: TÌM FILE OUTPUT: Tìm ảnh chụp File Explorer. Chú ý SỐ THỨ TỰ ở góc ảnh, ảnh File Explorer hợp lệ phải có số thứ tự LỚN HƠN (nằm sau) ảnh Status Panel. Lấy tên file và 'Date modified' (đổi sang định dạng YYYY/MM/DD HH:MM 24h) điền vào 'file_name' và 'file_modified_time'.
+     * CHÚ Ý 1: Đọc đường dẫn (path) thư mục trên thanh địa chỉ. NẾU đường dẫn chứa chữ 'receive', ĐÓ CHẮC CHẮN LÀ FILE INPUT -> TUYỆT ĐỐI BỎ QUA và để rỗng 'file_name'.
+     * CHÚ Ý 2 (QUAN TRỌNG): Chỉ ghi nhận file nếu 'Date modified' của file đó BẰNG HOẶC SAU thời gian '実行開始' (start_time) của ca test hiện tại. 
+     * CHÚ Ý 3: Nếu đường dẫn KHÔNG chứa 'receive' và thời gian file hợp lệ, hãy CHỌN file có 'Date modified' MỚI NHẤT (thời gian muộn hơn).
+     * CHÚ Ý 4: Nếu 'Date modified' của file NHỎ HƠN (diễn ra trước) thời gian '実行開始' (start_time), hoặc ca test kết thúc lỗi (戻り値 khác 0) và không sinh ra file mới, hãy hiểu đó là file cũ còn sót lại -> TUYỆT ĐỐI BỎ QUA, để rỗng "" cho 'file_name' và 'file_modified_time'.
+     * CHÚ Ý 5 (TỐI QUAN TRỌNG): Đọc CHÍNH XÁC nội dung hiển thị trên ảnh (nhớ chuyển đổi PM sang 24h). KHÔNG ĐƯỢC copy 'start_time' điền vào 'file_modified_time'. KHÔNG ĐƯỢC tự ý đoán mò, bịa đặt hoặc tự đồng bộ dữ liệu. Nếu không nhìn thấy rõ chữ trên ảnh, BẮT BUỘC ĐỂ RỖNG ("").
+     * CHÚ Ý 6 (CHỐNG ẢO GIÁC): TUYỆT ĐỐI KHÔNG copy 'start_time', 'duration_ms', 'jobnet_id', 'interface_id', 'file_name', 'file_modified_time' hay BẤT KỲ thông tin nào từ nhóm test trước điền vào nhóm test sau. Nếu trong các trang của nhóm test hiện tại KHÔNG CÓ thông tin, BẮT BUỘC để rỗng ("").
+   - BƯỚC 4: TÌM ẢNH LOG VIEWER (Nhận biết: Ảnh có chữ 'ログ設定名' hoặc 'アプリケーション' hoặc giao diện xem log). Tìm NGÀY và GIỜ của dòng cuối cùng (thường chứa chữ 'サブフローの実行が終了しました') và điền vào 'log_image_time' theo định dạng 'YYYY/MM/DD HH:MM:SS'. Nếu chỉ hiển thị giờ thì điền 'HH:MM:SS'. Nếu không có ảnh log, để rỗng "".
+Nếu không tìm thấy thông tin nào, hãy để rỗng ("").
+
+Cấu trúc JSON mong muốn:
+{
+  "共通_Flow_Config": {
+    "jobnet_id": "...",
+    "interface_id": "..."
+  },
+  "<COPY Y HỆT TÊN NHÓM TRONG DANH SÁCH LÊN ĐÂY>": {
+    "start_time": "HH:MM:SS",
+    "duration_ms": "123",
+    "jobnet_id": "...",
+    "interface_id": "...",
+    "file_name": "...",
+    "file_modified_time": "YYYY/MM/DD HH:MM",
+    "log_image_time": "YYYY/MM/DD HH:MM:SS"
+  }
+}

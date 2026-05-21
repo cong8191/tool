@@ -1,0 +1,132 @@
+{
+    "共通_Flow_Config": {
+        "jobnet_id": "P1J0065@10065",
+        "interface_id": "WMSH0065"
+    },
+    "共通_■1回目 正常系・1000件未満・ファイル送信前結合有無=false": {
+        "start_time": "16:33:50",
+        "duration_ms": "609",
+        "jobnet_id": "P1J0065@10065",
+        "interface_id": "WMSH0065",
+        "file_name": "WMSH0065_output.tsv",
+        "file_modified_time": "2026/05/18 16:33",
+        "log_image_time": "16:33:51"
+    },
+    "共通_■2回目 異常系・起動パラメータ不正": {
+        "start_time": "16:40:48",
+        "duration_ms": "319",
+        "jobnet_id": "",
+        "interface_id": "",
+        "file_name": "",
+        "file_modified_time": "",
+        "log_image_time": "16:40:48"
+    },
+    "共通_■3回目 正常系・ファイル送信前結合有無=true": {
+        "start_time": "16:44:38",
+        "duration_ms": "629",
+        "jobnet_id": "P1J0065@10065",
+        "interface_id": "WMSH0065",
+        "file_name": "WMSH0065_output.tsv",
+        "file_modified_time": "2026/05/18 16:44",
+        "log_image_time": ""
+    },
+    "共通_■4回目 異常系・すでにファイルが存在する場合": {
+        "start_time": "16:47:02",
+        "duration_ms": "370",
+        "jobnet_id": "P1J0065@10065",
+        "interface_id": "WMSH0065",
+        "file_name": "",
+        "file_modified_time": "",
+        "log_image_time": "16:47:02"
+    },
+    "共通_■5回目 正常系・0byteファイル": {
+        "start_time": "16:51:18",
+        "duration_ms": "430",
+        "jobnet_id": "P1J0065@10065",
+        "interface_id": "WMSH0065",
+        "file_name": "WMSH0065_output.tsv",
+        "file_modified_time": "2026/05/18 16:51",
+        "log_image_time": ""
+    },
+    "共通_■6回目 正常系・データ行1000行": {
+        "start_time": "16:54:46",
+        "duration_ms": "1117",
+        "jobnet_id": "P1J0065@10065",
+        "interface_id": "WMSH0065",
+        "file_name": "WMSH0065_output.tsv",
+        "file_modified_time": "2026/05/18 16:54",
+        "log_image_time": ""
+    },
+    "共通_■7回目 正常系・データ行1000行以上": {
+        "start_time": "17:50:54",
+        "duration_ms": "940",
+        "jobnet_id": "P1J0065@10065",
+        "interface_id": "WMSH0065",
+        "file_name": "WMSH0065_output.tsv",
+        "file_modified_time": "2026/05/19 17:50",
+        "log_image_time": ""
+    },
+    "個別_■1回目 正常系・0byteファイル": {
+        "start_time": "17:03:20",
+        "duration_ms": "650",
+        "jobnet_id": "P1J0065@10065",
+        "interface_id": "WMSH0065",
+        "file_name": "WMSH0065_output.tsv",
+        "file_modified_time": "2026/05/18 17:03",
+        "log_image_time": ""
+    },
+    "個別_■2回目 正常系・全項目空データファイル": {
+        "start_time": "17:06:50",
+        "duration_ms": "750",
+        "jobnet_id": "P1J0065@10065",
+        "interface_id": "WMSH0065",
+        "file_name": "WMSH0065_output.tsv",
+        "file_modified_time": "2026/05/18 17:06",
+        "log_image_time": ""
+    },
+    "個別_■3回目 正常系・ファイル定義確認": {
+        "start_time": "17:10:48",
+        "duration_ms": "619",
+        "jobnet_id": "P1J0065@10065",
+        "interface_id": "WMSH0065",
+        "file_name": "WMSH0065_output.tsv",
+        "file_modified_time": "2026/05/18 17:10",
+        "log_image_time": ""
+    },
+    "個別_■4回目正常系・列分割→行変換確認（明細0件）": {
+        "start_time": "17:14:00",
+        "duration_ms": "749",
+        "jobnet_id": "P1J0065@10065",
+        "interface_id": "WMSH0065",
+        "file_name": "",
+        "file_modified_time": "",
+        "log_image_time": ""
+    },
+    "個別_■5回目正常系・列分割→行変換確認（明細1件）": {
+        "start_time": "17:17:07",
+        "duration_ms": "739",
+        "jobnet_id": "P1J0065@10065",
+        "interface_id": "WMSH0065",
+        "file_name": "WMSH0065_output.tsv",
+        "file_modified_time": "2026/05/18 17:17",
+        "log_image_time": ""
+    },
+    "個別_■6回目正常系・列分割→行変換確認（明細4件）": {
+        "start_time": "17:20:20",
+        "duration_ms": "899",
+        "jobnet_id": "P1J0065@10065",
+        "interface_id": "WMSH0065",
+        "file_name": "WMSH0065_output.tsv",
+        "file_modified_time": "2026/05/18 17:20",
+        "log_image_time": ""
+    },
+    "個別_■7回目正常系・列分割→行変換確認（レコードが複数件あり）": {
+        "start_time": "17:24:52",
+        "duration_ms": "419",
+        "jobnet_id": "P1J0065@10065",
+        "interface_id": "WMSH0065",
+        "file_name": "WMSH0065_output.tsv",
+        "file_modified_time": "2026/05/18 17:24",
+        "log_image_time": ""
+    }
+}
