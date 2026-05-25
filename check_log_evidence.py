@@ -731,7 +731,7 @@ def analyze_group(group_name, data, rs, rs_name, group_images=None, file_name=""
     panel_duration_ms = None
     jobnet_id = None
     interface_id = None
-    end_time_log_img = None
+    log_image_time = None
 
     # Kiểm tra thời gian từ ảnh (OCR)
     if not group_images:
@@ -890,12 +890,10 @@ def analyze_group(group_name, data, rs, rs_name, group_images=None, file_name=""
                     t_log_dt = datetime.datetime.combine(datetime.date.today(), t_log)
                     diff_seconds = (t_panel_dt - t_log_dt).total_seconds()
                     
-                    if t_log >= t_panel:
-                        print(f"      ✅ OK: Thời gian log ({first_log_time_str}) >= Thời gian ảnh ({panel_start_time})")
-                    elif diff_seconds <= 2:
-                        print(f"      ✅ OK (Chấp nhận dung sai {int(diff_seconds)}s): Thời gian log ({first_log_time_str}) ~ Thời gian ảnh ({panel_start_time})")
+                    if abs(diff_seconds) <= 1:
+                        print(f"      ✅ OK: Thời gian log ({first_log_time_str}) khớp Thời gian ảnh ({panel_start_time}) (Lệch {int(diff_seconds)}s)")
                     else:
-                        print(f"      ❌ LỖI: Thời gian log ({first_log_time_str}) < Thời gian ảnh ({panel_start_time}) (Chênh lệch {int(diff_seconds)}s)")
+                        print(f"      ❌ LỖI: Thời gian log ({first_log_time_str}) lệch quá 1s so với Thời gian ảnh ({panel_start_time}) (Lệch {int(diff_seconds)}s)")
                 except ValueError:
                     print(f"      ⚠️ Không thể so sánh thời gian: Log ({first_log_time_str}), Ảnh ({panel_start_time})")
     else:
