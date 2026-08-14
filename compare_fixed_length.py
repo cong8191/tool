@@ -4,10 +4,7 @@ import openpyxl
 from openpyxl.styles import PatternFill
 import os
 import sys
-import datetime
-import shutil
-import subprocess
-import tempfile
+from pathlib import Path
 import json
 
 if hasattr(sys.stdout, 'reconfigure'):
@@ -15,134 +12,134 @@ if hasattr(sys.stdout, 'reconfigure'):
 if hasattr(sys.stderr, 'reconfigure'):
     sys.stderr.reconfigure(encoding='utf-8')
 
-def try_fallback_tools(input_path, output_path, from_enc, to_enc, keep_sosi=False):
-    """Tự động tìm và gọi công cụ iconv hoặc java có sẵn trên Windows để convert"""
-    from_enc_lower = from_enc.lower()
-    to_enc_lower = to_enc.lower()
+# ==============================================================================
+# CÁC HÀM TÁI SỬ DỤNG TỪ DECODE_TOOL.PY
+# ==============================================================================
+try:
+    import ebcdic
+except ImportError:
+    pass # Sẽ xử lý ở dưới
 
-    if from_enc_lower in ['cp930', 'ibm930']: iconv_from, java_from, mixed_enc = 'IBM930', 'Cp930', 'Cp930'
-    elif from_enc_lower in ['cp939', 'ibm939']: iconv_from, java_from, mixed_enc = 'IBM939', 'Cp939', 'Cp939'
-    elif from_enc_lower in ['cp20290', 'ibm20290', 'cp290', 'ibm290']: iconv_from, java_from, mixed_enc = 'IBM290', 'Cp290', 'Cp930'
-    else: iconv_from, java_from, mixed_enc = from_enc, from_enc, from_enc
+# Bảng mã EBCDIC cơ sở (SBCS - Single-Byte)
+_ENC_MAP = {
+    "AS-CP00930": ("cp290", True), "CP00930": ("cp290", True), "CP930": ("cp290", True),
+    "AS-CP00939": ("cp1027", True), "CP00939": ("cp1027", True), "CP939": ("cp1027", True),
+    "UTF-8": ("utf-8", False), "SHIFT_JIS": ("cp932", False), "WINDOWS-31J": ("cp932", False),
+}
 
-    iconv_to = 'SHIFT-JIS' if to_enc_lower in ['shift_jis', 'sjis', 'cp932'] else to_enc
-    java_to = 'MS932' if to_enc_lower in ['shift_jis', 'sjis', 'cp932'] else ('UTF-8' if to_enc_lower == 'utf-8' else to_enc)
-
-    # 1. Ưu tiên dùng Java trước vì Java xử lý các bảng mã EBCDIC IBM chuẩn xác hơn iconv trên Windows
-    if shutil.which('java') and shutil.which('javac'):
-        if keep_sosi:
-            print(" -> [DEBUG] Kích hoạt chế độ thay thế SOSI bằng space (0x20)")
-            java_code = f"""import java.io.ByteArrayOutputStream; import java.nio.file.Files; import java.nio.file.Paths; import java.util.Arrays; import java.nio.charset.Charset;
-            public class TmpConverter {{ public static void main(String[] args) throws Exception {{
-                String mixedEnc = "{mixed_enc}";
-                if (!Charset.isSupported(mixedEnc)) {{
-                    String[] fallbacks = {{"Cp930", "IBM930", "x-IBM930", "Cp939", "IBM939", "x-IBM939"}};
-                    for (String enc : fallbacks) {{
-                        if (Charset.isSupported(enc)) {{ mixedEnc = enc; break; }}
-                    }}
-                }}
-                byte[] input = Files.readAllBytes(Paths.get(args[0]));
-                ByteArrayOutputStream out = new ByteArrayOutputStream();
-                int start = 0; boolean isDbcs = false;
-                for (int i = 0; i < input.length; i++) {{
-                    if (input[i] == 0x0E) {{
-                        if (i > start) {{
-                            byte[] chunk = Arrays.copyOfRange(input, start, i);
-                            out.write(new String(chunk, mixedEnc).getBytes("{java_to}"));
-                        }}
-                        out.write(0x20); start = i + 1; isDbcs = true;
-                    }} else if (input[i] == 0x0F) {{
-                        if (i > start) {{
-                            byte[] chunk = Arrays.copyOfRange(input, start, i);
-                            byte[] wrapped = new byte[chunk.length + 2];
-                            wrapped[0] = 0x0E;
-                            System.arraycopy(chunk, 0, wrapped, 1, chunk.length);
-                            wrapped[wrapped.length - 1] = 0x0F;
-                            out.write(new String(wrapped, mixedEnc).getBytes("{java_to}"));
-                        }}
-                        out.write(0x20); start = i + 1; isDbcs = false;
-                    }}
-                }}
-                if (start < input.length) {{
-                    byte[] chunk = Arrays.copyOfRange(input, start, input.length);
-                    if (isDbcs) {{
-                        byte[] wrapped = new byte[chunk.length + 2];
-                        wrapped[0] = 0x0E;
-                        System.arraycopy(chunk, 0, wrapped, 1, chunk.length);
-                        wrapped[wrapped.length - 1] = 0x0F;
-                        out.write(new String(wrapped, mixedEnc).getBytes("{java_to}"));
-                    }} else {{
-                        out.write(new String(chunk, mixedEnc).getBytes("{java_to}"));
-                    }}
-                }}
-                Files.write(Paths.get(args[1]), out.toByteArray());
-            }} }}"""
-        else:
-            java_code = f"""import java.nio.file.Files; import java.nio.file.Paths; import java.nio.charset.Charset;
-            public class TmpConverter {{ public static void main(String[] args) throws Exception {{
-                String fromEnc = "{java_from}";
-                if (!Charset.isSupported(fromEnc)) {{
-                    String[] fallbacks = {{"x-IBM290", "Cp290", "IBM290", "Cp930", "IBM930", "x-IBM930"}};
-                    for (String enc : fallbacks) {{
-                        if (Charset.isSupported(enc)) {{
-                            fromEnc = enc;
-                            break;
-                        }}
-                    }}
-                }}
-                Files.write(Paths.get(args[1]), new String(Files.readAllBytes(Paths.get(args[0])), fromEnc).getBytes("{java_to}"));
-            }} }}"""
-        with open("TmpConverter.java", "w", encoding="utf-8") as f: f.write(java_code)
-        try:
-            subprocess.run(['javac', 'TmpConverter.java'], check=True)
-            subprocess.run(['java', 'TmpConverter', input_path, output_path], check=True)
-            print(" -> [DEBUG] Đã dùng Java để convert file thành công.")
-            return True
-        except subprocess.CalledProcessError as e: print(f"Lỗi khi chạy Java: {e}", file=sys.stderr)
-        finally:
-            if os.path.exists("TmpConverter.java"): os.remove("TmpConverter.java")
-            if os.path.exists("TmpConverter.class"): os.remove("TmpConverter.class")
-
-    # 2. Thử dùng iconv nếu Java lỗi hoặc không có Java
-    iconv_path = shutil.which('iconv')
-    if not iconv_path and os.path.exists(r"C:\Program Files\Git\usr\bin\iconv.exe"):
-        iconv_path = r"C:\Program Files\Git\usr\bin\iconv.exe"
-
-    if iconv_path and not keep_sosi:
-        cmd = [iconv_path, '-c', '-f', iconv_from, '-t', iconv_to, '-o', output_path, input_path]
-        try:
-            subprocess.run(cmd, check=True)
-            print(" -> [DEBUG] Đã dùng iconv để convert file thành công.")
-            return True
-        except subprocess.CalledProcessError as e:
-            print(f"Lỗi khi chạy iconv: {e}", file=sys.stderr)
-
-    return False
-
-def convert_file_to_temp(input_path, output_path, from_encoding, to_encoding, keep_sosi=False):
+def resolve_encoding(name):
+    if not name: return "cp290", True, "mac dinh AS-CP00930"
+    key = str(name).strip().upper()
+    if key in _ENC_MAP: return _ENC_MAP[key][0], _ENC_MAP[key][1], None
     try:
-        with open(input_path, 'rb') as f_in:
-            binary_data = f_in.read()
-        decoded_string = binary_data.decode(from_encoding, errors='replace')
-        output_data = decoded_string.encode(to_encoding, errors='replace')
-        with open(output_path, 'wb') as f_out:
-            f_out.write(output_data)
-        print(" -> [DEBUG] Đã dùng Python thuần để convert file thành công.")
-        return True
-    except LookupError as e:
-        return try_fallback_tools(input_path, output_path, from_encoding, to_encoding, keep_sosi)
-    except Exception as e:
-        print(f"Lỗi chuyển đổi: {e}")
-        return False
+        b"x".decode(name)
+        return name, False, "codec python truc tiep (khong coi la EBCDIC)"
+    except Exception:
+        return None, None, f"encoding khong nhan dien: {name!r}"
+
+def _nib(letter):
+    return {"A": 0xA, "B": 0xB, "C": 0xC, "D": 0xD, "E": 0xE, "F": 0xF}.get(str(letter).strip().upper())
+
+def layout_signs(lay):
+    ps = lay.get("packed_sign") or {}
+    pneg = {_nib(x) for x in (ps.get("negative") or ["B", "D"])} or {0xB, 0xD}
+    zneg = {_nib(x) for x in (lay.get("zoned_sign_negative") or [])} or {0xD}
+    return pneg, zneg
+
+def _fmt_number(digit_str, neg, digits, decimals):
+    s = digit_str
+    if digits and digits > 0: s = s[-digits:].zfill(digits)
+    if decimals and decimals > 0:
+        ip = s[:-decimals] or "0"
+        fp = s[-decimals:]
+        s = f"{ip}.{fp}"
+    return f"-{s}" if neg else s
+
+def decode_zoned(b, digits, decimals, neg_nibbles):
+    if not b: return ""
+    digs = "".join(str(x & 0x0F) for x in b)
+    sign = (b[-1] >> 4) & 0x0F
+    neg = sign in neg_nibbles
+    return _fmt_number(digs, neg, digits, decimals)
+
+def decode_packed(b, digits, decimals, neg_nibbles):
+    if not b: return ""
+    nib = []
+    for x in b:
+        nib.extend([(x >> 4) & 0x0F, x & 0x0F])
+    sign = nib.pop()
+    digs = "".join(map(str, nib))
+    neg = sign in neg_nibbles
+    return _fmt_number(digs, neg, digits, decimals)
+
+_DBCS_TABLE = None
+def _dbcs_table():
+    """Tải bảng map CP300 (DBCS Kanji) từ file JSON."""
+    global _DBCS_TABLE
+    if _DBCS_TABLE is None:
+        p = Path(__file__).resolve().parent / "data" / "cp300_dbcs.json"
+        try:
+            raw = json.loads(p.read_text(encoding="utf-8"))
+            _DBCS_TABLE = {int(k, 16): v for k, v in raw.items()}
+        except Exception:
+            _DBCS_TABLE = {}
+    return _DBCS_TABLE
+
+def decode_char(b, codec, is_ebcdic, warns):
+    """Giải mã ký tự EBCDIC, xử lý DBCS (Kanji) bằng bảng map."""
+    if not is_ebcdic or 0x0E not in b:
+        try:
+            return b.decode(codec, errors="replace")
+        except LookupError:
+            warns.add(f"codec '{codec}' không có (cai 'ebcdic'?)")
+            return f"<?codec:{b.hex()}>"
+    tbl = _dbcs_table()
+    if not tbl:
+        warns.add("Không tải được bảng CP300 (data/cp300_dbcs.json) -> Kanji sẽ ra placeholder.")
+    out = []
+    i, n = 0, len(b)
+    while i < n:
+        c = b[i]
+        if b[i] == 0x0E:
+            out.append(" ") # Thay thế 0x0E bằng space
+            i += 1
+            while i < n and b[i] != 0x0F:
+                if i + 1 < n and b[i+1] != 0x0F:
+                    key = (b[i] << 8) | b[i+1]
+                    ch = tbl.get(key, f"《{key:04X}》")
+                    out.append(ch)
+                    i += 2
+                else: # Lẻ byte
+                    out.append(f"《?{b[i]:02X}》"); i += 1
+            if i < n and b[i] == 0x0F:
+                out.append(" ") # Thay thế 0x0F bằng space
+                i += 1
+        elif c == 0x0F: # SI lẻ
+            out.append(" ") # Thay thế 0x0F lẻ bằng space
+            i += 1
+        else:
+            try:
+                out.append(bytes([c]).decode(codec, errors="replace"))
+            except:
+                out.append("?")
+            i += 1
+    return "".join(out)
+
+def split_records(data, reclen):
+    if not reclen or not data: return []
+    return [data[i:i + reclen] for i in range(0, len(data), reclen)]
+
+# ==============================================================================
 
 def main():
     parser = argparse.ArgumentParser(description="Tool tìm kiếm data trong file output dựa trên tổng số byte và đánh dấu trực tiếp vào file Excel.")
     parser.add_argument("--excel", required=True, help="Đường dẫn file Excel (Dòng 1: Name, Dòng 2: Length, Dòng 3 trở đi: Data testcase).")
-    parser.add_argument("--output", required=True, help="Đường dẫn file text Output.")
+    parser.add_argument("--dat", required=True, help="Đường dẫn file data EBCDIC (.dat).")
+    # Bỏ layout JSON, thêm lại from_enc và to_enc
+    parser.add_argument("--from_enc", default="cp930", help="Bảng mã EBCDIC nguồn (VD: cp930, cp290). Mặc định là cp930.")
+    parser.add_argument("--to_enc", default="cp932", help="Bảng mã để hiển thị (VD: cp932, utf-8). Mặc định là cp932.")
     parser.add_argument("--out_excel", default="Result.xlsx", help="Đường dẫn file Excel xuất ra báo cáo (Mặc định: Result.xlsx).")
-    parser.add_argument("--encoding", default="shift_jis", help="Bảng mã file text (Mặc định: shift_jis).")
-    parser.add_argument("--from_enc", default=None, help="Bảng mã gốc của file Output (VD: cp20290). Nếu có, tool sẽ tự động convert trước khi xử lý.")
-    parser.add_argument("--keep_sosi", action="store_true", help="Bảo toàn chiều dài byte bằng cách thay thế ký tự SOSI (0x0E, 0x0F) bằng ký tự space (0x20).")
+    parser.add_argument("--out_json", default=None, help="Đường dẫn file JSON chi tiết.")
     
     args = parser.parse_args()
     
@@ -150,18 +147,17 @@ def main():
         print(f"Lỗi: Không tìm thấy file excel '{args.excel}'")
         return
         
-    if not os.path.exists(args.output):
-        print(f"Lỗi: Không tìm thấy file output '{args.output}'")
+    if not os.path.exists(args.dat):
+        print(f"Lỗi: Không tìm thấy file data '{args.dat}'")
         return
         
     print("1. Đang đọc file Excel...")
     wb = openpyxl.load_workbook(args.excel)
     sheet = wb.active
 
-    # Đọc layout từ dòng 1 (name) và dòng 2 (length)
-    layout_total_bytes = 0
-    layout = []
-    
+    print("2. Đang đọc layout từ Excel (dòng 1: Name, dòng 2: Length)...")
+    fields = []
+    reclen = 0
     if sheet.max_row < 2:
         print("Lỗi: File Excel phải có ít nhất 2 dòng (dòng 1 cho Name, dòng 2 cho Length).")
         return
@@ -175,124 +171,124 @@ def main():
         
         if length is not None and str(length).strip().isdigit():
             length = int(length)
-            start_byte = layout_total_bytes
-            layout_total_bytes += length
-            end_byte = layout_total_bytes
-            # Lưu lại vị trí cột (1-based), start_byte và end_byte để dùng sau
-            layout.append({'name': str(name).strip(), 'length': length, 'col': i + 1, 'start_byte': start_byte, 'end_byte': end_byte})
+            fields.append({
+                'name': str(name).strip() if name else f"FIELD_{i+1}", 
+                'len': length, 
+                'col': i + 1
+            })
+            reclen += length
 
-    print(f" -> Tìm thấy {len(layout)} fields. Tổng số byte layout (dự kiến): {layout_total_bytes}")
-    if layout_total_bytes == 0:
-        print("Lỗi: Tổng số byte layout = 0. Vui lòng kiểm tra lại dòng 2 trong file Excel có chứa số hay không.")
+    if not fields or not reclen:
+        print("Lỗi: Không đọc được layout từ Excel hoặc tổng chiều dài bằng 0.")
         return
 
-    print("2. Đang đọc file Output...")
-    output_file_to_read = args.output
+    # Sử dụng from_enc để xác định encoding
+    codec, is_ebcdic, enc_note = resolve_encoding(args.from_enc)
+    if enc_note: print(f" -> [Encoding Note] {enc_note}")
+    if not codec:
+        print(f"Lỗi: {enc_note}")
+        return
 
-    if args.from_enc:
-        print(f" -> Tự động convert output từ '{args.from_enc}' sang '{args.encoding}'...")
-        
-        # Đổi thành lưu file cố định để user có thể mở lên xem nội dung đã convert
-        base_name, _ = os.path.splitext(args.output)
-        converted_file_path = f"{base_name}_converted.txt"
-        
-        if convert_file_to_temp(args.output, converted_file_path, args.from_enc, args.encoding, args.keep_sosi):
-            output_file_to_read = converted_file_path
-            print(f" -> [DEBUG] File convert thành công. Đã lưu bản sao tại: {converted_file_path}")
-        else:
-            print("Lỗi: Convert thất bại. Vui lòng kiểm tra lại môi trường hoặc bảng mã.")
-            return
+    # Sử dụng cấu hình mặc định cho packed/zoned signs
+    pneg, zneg = {0xB, 0xD}, {0xD}
+    warns = set()
 
-    with open(output_file_to_read, 'rb') as f:
-        output_bytes = f.read()
+    print(f" -> Layout: {len(fields)} fields, record_length={reclen}, encoding={codec}")
 
-    if args.from_enc:
-        preview_str = output_bytes[:500].decode(args.encoding, errors='replace')
-        print(f" -> [PREVIEW NỘI DUNG SAU CONVERT (500 byte đầu)]:\n{preview_str}\n" + "-"*50)
+    print("3. Đang đọc file data EBCDIC...")
+    dat_bytes = open(args.dat, 'rb').read()
+    records = split_records(dat_bytes, reclen)
+    print(f" -> File data có {len(records)} record.")
 
-    # Nhận diện xem file output có ký tự xuống dòng hay không
-    use_lines = False
-    if b'\n' in output_bytes[:layout_total_bytes + 100]:
-        print(" -> Nhận diện file có chia dòng (Newline). Sẽ trích xuất đoạn chunk theo từng dòng.")
-        lines = output_bytes.splitlines()
-        use_lines = True
-    else:
-        print(" -> File không có ký tự xuống dòng. Sẽ tự động tính length từng dòng data và cộng dồn offset.")
-
-    print("3. Đang tìm kiếm data và đánh dấu vào Excel...")
+    print("4. Đang so sánh và đánh dấu vào Excel...")
     fill_match = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid") # Xanh lá (Khớp)
     fill_diff = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")  # Đỏ (Lệch)
 
-    # Dòng data đầu tiên là dòng 3
-    start_data_row = 3
+    # Chuẩn bị file convert
+    dat_basename = os.path.splitext(os.path.basename(args.dat))[0]
+    converted_txt_path = os.path.join(os.path.dirname(args.out_excel), f"{dat_basename}_converted.txt")
+    converted_lines = []
+
+    # Tìm dòng bắt đầu của data trong Excel (dòng đầu tiên sau 2 dòng header)
+    start_data_row = 3 
     if sheet.max_row < start_data_row:
         print("Lỗi: Không có dòng data nào để kiểm tra (cần data từ dòng 3 trở đi).")
         return
 
     results_data = []
-    current_offset = 0
     match_count = 0
     diff_count = 0
 
-    # Duyệt từ dòng 3 đến dòng cuối cùng
-    for row_idx in range(start_data_row, sheet.max_row + 1):
-        record_index = row_idx - start_data_row
-        if use_lines:
-            if record_index < len(lines): 
-                chunk_bytes = lines[record_index]
-            else:
-                chunk_bytes = b"" # Output không đủ dòng
-        else:
-            # Luôn cắt block theo chiều dài chuẩn của layout để đảm bảo không bị lệch Record
-            slice_length = layout_total_bytes
-            start_pos = current_offset
-            end_pos = start_pos + slice_length
-            chunk_bytes = output_bytes[start_pos:end_pos]
-            current_offset = end_pos # Cộng dồn cho record tiếp theo
-            
+    # Tính tổng số record cần xử lý (không giới hạn theo sheet.max_row)
+    excel_data_rows = max(0, sheet.max_row - start_data_row + 1)
+    total_records = max(len(records), excel_data_rows)
+    print(f" -> Tổng số dòng/record xử lý: {total_records} (DAT: {len(records)} record, Excel: {excel_data_rows} dòng data)")
+
+    for i in range(total_records):
+        excel_row_idx = start_data_row + i
+        rec_bytes = records[i] if i < len(records) else b""
+
+        if i >= len(records):
+            warns.add(f"File Excel có nhiều dòng hơn số record trong file DAT (Dòng {excel_row_idx} không có dữ liệu DAT tương ứng).")
+        elif excel_row_idx > sheet.max_row:
+            warns.add(f"File DAT có nhiều record hơn số dòng trong file Excel (Record {i+1} không có dòng Excel tương ứng).")
+
+        print(f" - Đang kiểm tra Record {i+1} (Excel dòng {excel_row_idx})")
+
         row_result = {
-            'row_index': row_idx,
+            'row_index': excel_row_idx,
             'fields': []
         }
-        
-        # Dữ liệu đã được convert sẵn (SOSI -> space), không cần clean nữa
-        chunk_clean = chunk_bytes
 
-        print(current_offset)
-        print(f" - Đang kiểm tra dòng {row_idx} (Record {record_index + 1}) | Chiều dài (từ dòng 2): {layout_total_bytes} bytes")
+        record_decoded_parts = []
+        # Từ khóa để nhận diện trường số
+        NUMERIC_KEYWORDS = ["NUM", "DEC", "PACKED", "ZONED", "AMT", "KINGAKU", "SURYO", "NUMBER", "COUNT", "KOSUU", "TANI", "GAKU"]
 
-        if not chunk_bytes:
-            print(f"   -> Cảnh báo: File output không có đủ data cho record {record_index + 1}")
-        else:
-            display_chunk = chunk_clean.decode(args.encoding, errors='replace')
-            print(f"   [Data Output]: '{display_chunk}'")
-        
-        for field in layout:
-            # Lấy dữ liệu thực tế từ file output
-            start_byte, end_byte = field['start_byte'], field['end_byte']
-            actual_field_bytes = chunk_clean[start_byte:end_byte]
-            actual_str = actual_field_bytes.decode(args.encoding, errors='replace')
+        offset = 0
+        for field in fields:
+            field_len = field.get("len", 0)
+            field_name = field.get("name", "").upper()
+            chunk = rec_bytes[offset:offset + field_len] if offset < len(rec_bytes) else b""
+            offset += field_len
+
+            # Tự động nhận diện kiểu dữ liệu
+            is_potentially_numeric = any(keyword in field_name for keyword in NUMERIC_KEYWORDS)
+
+            decoded_values = {}
+            # Luôn giải mã kiểu char
+            decoded_values['char'] = decode_char(chunk, codec, is_ebcdic, warns)
+
+            # Nếu có khả năng là số, thử giải mã thêm packed và zoned
+            if is_potentially_numeric:
+                # Giả định mặc định cho digits và decimals khi không có layout
+                decoded_values['packed'] = decode_packed(chunk, None, 0, pneg)
+                decoded_values['zoned'] = decode_zoned(chunk, None, 0, zneg)
+            
+            # Giá trị mặc định để so sánh
+            actual_str = decoded_values['char']
+            record_decoded_parts.append(actual_str)
 
             # Lấy dữ liệu mong đợi từ file Excel
-            cell = sheet.cell(row=row_idx, column=field['col'])
+            cell = sheet.cell(row=excel_row_idx, column=field['col'])
             expected_val = cell.value
             expected_str = ""
             has_data = False
 
             if expected_val is not None:
                 has_data = True
-                if isinstance(expected_val, float) and expected_val.is_integer():
-                    expected_str = str(int(expected_val))
-                elif isinstance(expected_val, datetime.datetime):
-                    expected_str = expected_val.strftime("%Y%m%d")
-                else:
-                    expected_str = str(expected_val)
+                expected_str = str(expected_val)
             
             # So sánh và tô màu
             status = 'empty' # Mặc định là ô trống trong Excel
             if has_data:
-                expected_bytes = expected_str.encode(args.encoding, errors='replace')
-                if expected_bytes in actual_field_bytes:
+                # So sánh với tất cả các khả năng đã giải mã
+                is_match = False
+                for dec_type, dec_val in decoded_values.items():
+                    if expected_str.strip() == dec_val.strip():
+                        is_match = True
+                        actual_str = dec_val # Cập nhật actual_str thành giá trị khớp
+                        break
+                if is_match:
                     cell.fill = fill_match
                     match_count += 1
                     status = 'match'
@@ -300,18 +296,52 @@ def main():
                     cell.fill = fill_diff
                     diff_count += 1
                     status = 'diff'
+            else:
+                # Excel không có dữ liệu (ô trống)
+                if i < len(records) and actual_str.strip() != "":
+                    # DAT có dữ liệu mà Excel trống -> Diff
+                    cell.fill = fill_diff
+                    diff_count += 1
+                    status = 'diff'
+                else:
+                    # Cả 2 đều trống
+                    status = 'empty'
             
             row_result['fields'].append({
-                'name': field['name'],
+                'name': field.get('name'),
                 'expected': expected_str,
                 'actual': actual_str,
                 'status': status
             })
         results_data.append(row_result)
+        converted_lines.append("".join(record_decoded_parts))
 
-    print(f"[RESULT_JSON]{json.dumps({'layout': layout, 'results': results_data}, ensure_ascii=False)}")
+    # In ra JSON để web UI có thể đọc và hiển thị chi tiết
+    json_payload = {'layout': fields, 'results': results_data}
+    if args.out_json:
+        try:
+            with open(args.out_json, "w", encoding="utf-8") as f_json:
+                json.dump(json_payload, f_json, ensure_ascii=False)
+            print(f" -> Đã lưu JSON chi tiết thành công tại: {args.out_json}")
+        except Exception as e:
+            print(f" -> Lỗi khi lưu JSON chi tiết: {e}")
+
+    print(f"[RESULT_JSON]{json.dumps(json_payload, ensure_ascii=False)}")
     print(f"[SUMMARY] Match: {match_count}, Diff: {diff_count}")
-    print(f"4. Đang lưu kết quả ra: {args.out_excel}")
+
+    # Ghi file đã convert
+    try:
+        with open(converted_txt_path, "w", encoding="cp932", errors="replace") as f:
+            f.write("\n".join(converted_lines))
+        print(f" -> Đã tạo file convert thành công tại: {converted_txt_path}")
+    except Exception as e:
+        print(f" -> Lỗi khi tạo file convert: {e}")
+
+    if warns:
+        print("\nCảnh báo trong quá trình xử lý:")
+        for w in sorted(list(warns)): print(f" - {w}")
+
+    print(f"\n5. Đang lưu kết quả ra: {args.out_excel}")
     wb.save(args.out_excel)
     print("--- Hoàn tất ---")
 
